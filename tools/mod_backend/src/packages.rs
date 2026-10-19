@@ -87,6 +87,8 @@ pub struct Rules {
     #[serde(skip)]
     pub optional_bases: Vec<String>,
     pub directory_files: BTreeMap<u64, Vec<u64>>,
+    #[serde(skip)]
+    pub directory_file_sources: BTreeMap<(u64, u64), Vec<String>>,
 }
 #[derive(Clone, Serialize)]
 pub struct Diagnostic {
@@ -154,7 +156,7 @@ fn walk(
     }
     Ok(())
 }
-fn merge_rules(v: Value, r: &mut Rules) -> Result<(), String> {
+fn merge_rules(v: Value, r: &mut Rules, source: &Path) -> Result<(), String> {
     let o = v.as_object().ok_or("config.json must be an object")?;
     for (key, v) in o {
         let key = key.replace('-', "_");
@@ -204,12 +206,14 @@ fn merge_rules(v: Value, r: &mut Rules) -> Result<(), String> {
             }
             "new_dir_files" => {
                 for (k, v) in v.as_object().ok_or("new-dir-files must be an object")? {
-                    let list = r
-                        .directory_files
-                        .entry(paths::config_hash(&json!(k))?)
-                        .or_default();
+                    let directory = paths::config_hash(&json!(k))?;
                     for v in v.as_array().ok_or("new-dir-files values must be arrays")? {
-                        list.push(paths::config_hash(v)?);
+                        let file = paths::config_hash(v)?;
+                        r.directory_files.entry(directory).or_default().push(file);
+                        r.directory_file_sources
+                            .entry((directory, file))
+                            .or_default()
+                            .push(format!("{}: directory {k}, asset {v}", source.display()));
                     }
                 }
             }
@@ -327,7 +331,8 @@ pub fn scan(c: &Config) -> Result<Plan, String> {
                 let v = serde_json::from_slice(&fs::read(&disk).map_err(|e| e.to_string())?)
                     .map_err(|e| format!("{}: {e}", disk.display()))?;
                 let v = crate::slots::rules(v, &selection.slot_map)?;
-                merge_rules(v, &mut plan.rules).map_err(|e| format!("{}: {e}", disk.display()))?;
+                merge_rules(v, &mut plan.rules, &disk)
+                    .map_err(|e| format!("{}: {e}", disk.display()))?;
                 continue;
             }
             if !raw.contains('/') && !raw.starts_with("0x") {

@@ -43,6 +43,8 @@ build/
 - 音频替换只在配套音库确实需要解除共享时，带入原版 `.nus3bank` 并分配独立标识，以支持单服装语音。原本独立的音库（例如 common narration）保留原编号和全部字节；显式 `keep-shared` 同样阻止隔离。新编号从固定 ARCropolis 实现使用的 7420 开始。
 - `config.json` 的 `unshare-blacklist` / `keep-shared`、`preprocess-reshare`、`share-to-vanilla`、`share-to-added` / `new-shared-files`、`new-dir-infos`、`new-dir-infos-base`、`new-dir-files`，以及其下划线别名。
 - 共享目标支持单个路径、路径数组和公开 `arc-config` 的结构化文件/父目录形式。共享链会解析到最终来源，循环会报错。
+- `new-dir-files` 沿用 ARCropolis `add_files_to_directory` 的容错行为：原生 mod 配置中不存在的目录或文件引用只跳过对应项，其他有效资源继续加载；共享目标先生成再解析，避免误跳过合法别名。日志及 `open/status` 诊断保留来源配置与请求路径，磁盘上的 mod 文件保持原样。共享链缺少必要来源、共享循环及无法解析的归档仍报错。
+- 原版共享组保留独立的来源身份：当 mod 隔离了共享来源路径时，为旧来源建立仅存在于虚拟归档中的私有别名，继续引用原始 FileInfoIndex 和数据。避免当前服装或其他原版颜色等待另一个槽位的替换资源；不改磁盘上的 mod 或原始归档，也不绕过原生加载完成判定。
 - 额外服装、角色效果、舞台资源的加载组推断；相应的继承子目录由已存在的基础组提供。新增角色 EFF 由现有公共特效组统一持有，各颜色通过原生依赖加载，避免换色后枚举到未加载的特效；新增 EFF 使用原版分配对齐。
 - 参数补丁：`prcx/prcxml`、`stdatx/stdatxml`、`stprmx/stprmxml`；消息补丁 `xmsbt`；音频补丁 `patch3audio`；动作列表 `motion_list.yml` 和 `motdiff`；`bgm_property.bin` 合并。
 

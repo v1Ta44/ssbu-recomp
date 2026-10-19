@@ -2,7 +2,7 @@
 //! original file bytes are never rewritten. Layout reference: smash-arc 0.6.0 and
 //! runtime/loose_files.c (13.0.4). Every index is checked before the view is published.
 use crate::{
-    packages::{Config, Plan},
+    packages::{Config, Diagnostic, Plan},
     paths::{self, MASK, NONE},
 };
 use serde::Serialize;
@@ -635,6 +635,7 @@ pub struct Stats {
     pub additions: usize,
     pub streams: usize,
     pub groups: usize,
+    pub shared_sources: usize,
     pub patches: usize,
     pub original_size: u64,
     pub virtual_size: u64,
@@ -645,6 +646,7 @@ pub struct VirtualArchive {
     segments: Vec<Segment>,
     pub size: u64,
     pub stats: Stats,
+    pub diagnostics: Vec<Diagnostic>,
     pub source: PathBuf,
 }
 impl VirtualArchive {
@@ -878,6 +880,7 @@ fn build(path: &Path, c: &Config, plan: &Plan) -> Result<VirtualArchive, String>
             ..Stats::default()
         },
         source: path.to_path_buf(),
+        diagnostics: vec![],
     };
     let mut header = block(&view.original, 0, 56)?;
     if u64at(&header, 0)? != 0xabcdef9876543210 {
@@ -887,6 +890,7 @@ fn build(path: &Path, c: &Config, plan: &Plan) -> Result<VirtualArchive, String>
         && plan.rules.shares.is_empty()
         && plan.rules.directories.is_empty()
         && plan.rules.directory_bases.is_empty()
+        && plan.rules.directory_files.is_empty()
     {
         view.stats.virtual_size = original_size;
         return Ok(view);
@@ -1223,11 +1227,58 @@ fn build(path: &Path, c: &Config, plan: &Plan) -> Result<VirtualArchive, String>
             }
         }
     }
-    for files in plan.rules.directory_files.values() {
+    let original_dir_count = fs.dirs.len();
+    // Explicit directory bases copy the game's load group shape and dependencies.
+    let mut explicit_dirs = plan.rules.directories.clone();
+    explicit_dirs.extend(plan.rules.directory_bases.keys().cloned());
+    for path in explicit_dirs {
+        let base = plan.rules.directory_bases.get(&path).map(String::as_str);
+        if let Some(b) = base {
+            if !dir_map.contains_key(&paths::path_hash(b)) {
+                if plan.rules.optional_bases.contains(&path) {
+                    continue;
+                }
+                return Err(format!("base directory {b} for {path} does not exist"));
+            }
+        }
+        ensure_dir(&path, base, &mut fs, &mut search, &mut dir_map)?;
+    }
+    // Resolve after additions and shared aliases exist. ARCropolis's
+    // replacement/addition.rs::add_files_to_directory skips missing references;
+    // native packages often retain entries for textures or colors not shipped.
+    // Keep the disk config intact and use one resolved list for both passes.
+    let mut directory_files = BTreeMap::new();
+    for (dh, files) in &plan.rules.directory_files {
+        let Some(&di) = dir_map.get(dh) else {
+            let sources = files
+                .iter()
+                .filter_map(|h| plan.rules.directory_file_sources.get(&(*dh, *h)))
+                .flatten()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("; ");
+            view.diagnostics.push(Diagnostic {
+                level: "warning".into(),
+                code: "missing_directory".into(),
+                message: format!("skipped new-dir-files directory {dh:#x}: directory does not exist; {sources}"),
+            });
+            continue;
+        };
+        let mut resolved = Vec::new();
         for h in files {
-            let pi = *path_map
-                .get(h)
-                .ok_or_else(|| format!("new-dir-files asset {h:#x} does not exist"))?;
+            let Some(&pi) = path_map.get(h) else {
+                let sources = plan.rules.directory_file_sources
+                    .get(&(*dh, *h))
+                    .map(|s| s.join("; "))
+                    .unwrap_or_default();
+                view.diagnostics.push(Diagnostic {
+                    level: "warning".into(),
+                    code: "missing_directory_file".into(),
+                    message: format!("skipped new-dir-files asset {h:#x} in directory {dh:#x}: resource does not exist; {sources}"),
+                });
+                continue;
+            };
+            resolved.push(pi);
             if !payloads.contains_key(&pi) {
                 payloads.insert(
                     pi,
@@ -1235,6 +1286,7 @@ fn build(path: &Path, c: &Config, plan: &Plan) -> Result<VirtualArchive, String>
                 );
             }
         }
+        directory_files.insert(di, resolved);
     }
     // Only original aliases have meaningful indice values before new rows are assigned.
     let old_path_count = u32at(&fs.header, 4)? as usize;
@@ -1258,7 +1310,7 @@ fn build(path: &Path, c: &Config, plan: &Plan) -> Result<VirtualArchive, String>
     let original_path_count = u32at(&fs.header, 4)? as usize;
     let mut parent_dirs = HashMap::<u64, usize>::new();
     let mut memberships = HashMap::<usize, Vec<usize>>::new();
-    for di in 0..fs.dirs.len() {
+    for di in 0..original_dir_count {
         let start = fs.dirs.r32(di, 32)? as usize;
         let count = fs.dirs.r32(di, 36)? as usize;
         for j in start..start.checked_add(count).ok_or("directory overflow")? {
@@ -1272,21 +1324,6 @@ fn build(path: &Path, c: &Config, plan: &Plan) -> Result<VirtualArchive, String>
                 memberships.entry(pi).or_default().push(di);
             }
         }
-    }
-    // Explicit directory bases copy the game's load group shape and dependencies.
-    let mut explicit_dirs = plan.rules.directories.clone();
-    explicit_dirs.extend(plan.rules.directory_bases.keys().cloned());
-    for path in explicit_dirs {
-        let base = plan.rules.directory_bases.get(&path).map(String::as_str);
-        if let Some(b) = base {
-            if !dir_map.contains_key(&paths::path_hash(b)) {
-                if plan.rules.optional_bases.contains(&path) {
-                    continue;
-                }
-                return Err(format!("base directory {b} for {path} does not exist"));
-            }
-        }
-        ensure_dir(&path, base, &mut fs, &mut search, &mut dir_map)?;
     }
     // The native effect registry enumerates every EFF in an actor's search
     // folder (0x710355f8f0), including costume libraries. Its consumer assumes
@@ -1330,14 +1367,8 @@ fn build(path: &Path, c: &Config, plan: &Plan) -> Result<VirtualArchive, String>
         }
     }
     let mut extra = BTreeMap::<usize, Vec<usize>>::new();
-    for (dh, files) in &plan.rules.directory_files {
-        let di = *dir_map
-            .get(dh)
-            .ok_or_else(|| format!("new-dir-files directory {dh:#x} does not exist"))?;
-        for h in files {
-            let pi = *path_map
-                .get(h)
-                .ok_or_else(|| format!("new-dir-files asset {h:#x} does not exist"))?;
+    for (&di, files) in &directory_files {
+        for &pi in files {
             let target = effect_owners.get(&pi).copied().unwrap_or(di);
             if target != di {
                 dependencies.entry(di).or_default().insert(target);
@@ -1777,6 +1808,47 @@ fn build(path: &Path, c: &Config, plan: &Plan) -> Result<VirtualArchive, String>
                     fs.infos.w32(row, 4, xi);
                 }
             }
+        }
+    }
+    // A native shared FileGroup enumerates its original canonical FilePaths.
+    // Unsharing such a path changes the path's data identity; leaving it in that
+    // group makes even untouched costumes wait for another costume's replacement.
+    // Give each affected source a private alias to its ORIGINAL FileInfoIndex.
+    // No payload is copied: the original compressed bytes and native group links
+    // remain intact, so shared colors still load and unload their original data.
+    let shared_start = u32at(&fs.header, 16)? as usize;
+    let shared_end = shared_start + u32at(&fs.header, 36)? as usize;
+    let mut source_aliases = BTreeMap::<u32, u32>::new();
+    for group in shared_start..shared_end {
+        let start = fs.folders.r32(group, 16)? as usize;
+        let count = fs.folders.r32(group, 20)? as usize;
+        for ii in start..start.checked_add(count).ok_or("shared group overflow")? {
+            let pi = fs.infos.r32(ii, 0)? as usize;
+            let xi = fs.infos.r32(ii, 4)?;
+            if fs.paths.r64(pi, 0)? >> 40 == xi as u64 {
+                continue;
+            }
+            let alias = if let Some(&alias) = source_aliases.get(&xi) {
+                alias
+            } else {
+                let path = format!("__mods/shared_sources/{xi:06x}.bin");
+                let hash = paths::path_hash(&path);
+                if path_map.contains_key(&hash) {
+                    return Err(format!("reserved shared-source path collision: {path}"));
+                }
+                let mut row = [0; 32];
+                put64(&mut row, 0, hash | ((xi as u64) << 40));
+                put64(&mut row, 8, paths::hash("bin"));
+                put64(&mut row, 16, paths::hash("__mods/shared_sources/"));
+                put64(&mut row, 24, paths::name_hash(path.rsplit('/').next().unwrap()));
+                let alias = fs.paths.add(row)?;
+                search.add(&path)?;
+                path_map.insert(hash, alias as usize);
+                source_aliases.insert(xi, alias);
+                view.stats.shared_sources += 1;
+                alias
+            };
+            fs.infos.w32(ii, 0, alias);
         }
     }
     // Hash lookup for streams is sorted separately from the stream data arrays.

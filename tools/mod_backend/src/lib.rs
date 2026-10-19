@@ -93,7 +93,7 @@ fn request(v: Value) -> Result<Value, String> {
             .ok_or("missing archive path")?;
         prepare(path)?;
         let g = active().read().map_err(|e| e.to_string())?;
-        return Ok(json!({"archive":g.as_ref().map(|a|&a.stats)}));
+        return Ok(json!({"archive":g.as_ref().map(|a|&a.stats),"diagnostics":g.as_ref().map(|a|&a.diagnostics)}));
     }
     let mut s = state().lock().map_err(|e| e.to_string())?;
     match op {
@@ -180,7 +180,7 @@ fn request(v: Value) -> Result<Value, String> {
         "status" => {
             let a = active().read().map_err(|e| e.to_string())?;
             Ok(
-                json!({"active":a.is_some(),"archive":a.as_ref().map(|a|&a.source),"stats":a.as_ref().map(|a|&a.stats),"active_config":s.active_config,"config":s.config,"restart_required":restart(&s),"progress":progress_value(),"error":s.error}),
+                json!({"active":a.is_some(),"archive":a.as_ref().map(|a|&a.source),"stats":a.as_ref().map(|a|&a.stats),"diagnostics":a.as_ref().map(|a|&a.diagnostics),"active_config":s.active_config,"config":s.config,"restart_required":restart(&s),"progress":progress_value(),"error":s.error}),
             )
         }
         _ => Err(format!("unknown operation {op}")),
@@ -205,7 +205,7 @@ fn prepare(path: &str) -> Result<u64, String> {
         let p = packages::scan(&config)?;
         progress(2, 0, p.entries.len());
         let a = archive::VirtualArchive::build(std::path::Path::new(path), &config, &p)?;
-        for diagnostic in &p.diagnostics {
+        for diagnostic in p.diagnostics.iter().chain(&a.diagnostics) {
             println!("mods: [{}] {}", diagnostic.code, diagnostic.message);
         }
         println!(

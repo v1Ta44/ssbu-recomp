@@ -1,0 +1,38 @@
+资源模组安装目录
+================
+
+本包在构建时已启用资源模组后端。
+
+把每个模组解压到本目录下的独立文件夹。以游戏包根目录为起点：
+
+  mods/
+    MySkin/
+      fighter/...
+      ui/...
+      sound/...
+      config.json       （原模组附带时保留）
+    MyMusic/
+      stream;/sound/...
+  game/
+    ssbu_native.exe
+    ssbu_mod_backend.dll
+
+MySkin 只是模组名示例，可以自行命名。让 fighter、ui、sound、stage、effect、stream; 等
+资源目录直接位于模组文件夹内。不要把整套 ultimate/mods 外层目录原样嵌套进来。
+如果下载包内是 ultimate/mods/MySkin/，请把其中 MySkin 文件夹放在这里。
+
+这是包根目录的 mods，不是 game/mods，也不是 romfs。不需要修改 data.arc 或原模组文件。
+打包不会自动携带开发机上已安装的第三方模组；请自行安装。
+
+在 SSBU Console 的“模组”页可以导入 ZIP 或文件夹、修改别名、启停、调整服装槽位和打开目录。
+删除会移入本目录的 .trash 回收区。内容标签由路径自动识别，不代表完整兼容认证。
+
+默认加载全部已安装的资源包；有配置时按 config/mods.json 的当前配置加载。
+启停和优先级的修改在下一次启动游戏时生效，运行中不热切换。
+独立补丁缓存位于 cache/mods/；无需把缓存作为模组安装。
+
+仅支持资源包。Switch 的 .nro/Skyline 插件不能直接运行；含插件依赖的整包不保证可用。
+PC 原生 Hook DLL 使用独立的 SSBU_MODS 接口，不放在这里当作资源包。
+
+临时关闭资源模组：在 launcher/launcher.ini 的 [env] 节设置 SSBU_RESOURCE_MODS=0。
+删除该项后恢复默认加载。其他设置见源码仓库 docs/MOD_RESOURCES.md。

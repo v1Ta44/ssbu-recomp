@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The console window: core events only; files, processes and the game pipe go through the app's own commands",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

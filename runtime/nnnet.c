@@ -160,6 +160,7 @@ static void friends_NQ_GetSystemEvent(Ctx *c) {
 }
 static void c5a_register(void);                           /* nnsvc_c5a.inc: account, friends, bcat directory / file, ngc, pdm, pl VR */
 static void c4a_register(void);                           /* nnnet_c4a.inc: nifm, sockets, ssl, nsd, ldn, ec accessor */
+static void yn_register_sdk(void);                        /* final Yuzu virtual socket / LDN adapters */
 void nnnet_register_final(void) {                          /* after every other table (nnsdk2.c): replaces the do-nothing versions */
     static const ImportDef defs[] = {
         {"_ZN2nn7friends12UserPresence10InitializeERKNS_7account3UidE", friends_UserPresence_Initialize},
@@ -170,6 +171,7 @@ void nnnet_register_final(void) {                          /* after every other 
     register_imports(defs, (int)(sizeof defs / sizeof defs[0]));
     c4a_register();
     c5a_register();
+    yn_register_sdk();
 }
 
 /* ---------------------------------------------------------------- self-test */
@@ -180,6 +182,7 @@ static ImportFn h(const char *name) {
 }
 #include "nnnet_c4a.inc"
 #include "nnsvc_c5a.inc"
+#include "nnnet_yuzu.inc"
 int nnnet_selftest(Ctx *c) {
     int bad = 0, ok;
     bad += c4a_selftest(c);

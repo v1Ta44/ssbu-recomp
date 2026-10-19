@@ -30,6 +30,7 @@
 #include <windows.h>
 #include "runtime.h"
 #include "hostrt.h"
+#include "mod_resources.h"
 
 #define A0 (c->x[0])
 #define A1 (c->x[1])
@@ -521,16 +522,29 @@ static void fs_OpenFile(Ctx *c) {                     /* (FileHandle *out, const
     {   static int on = -1; if (on < 0) on = getenv("SSBU_FSLOG") != NULL;       /* D2 debug: every open on stdout */
         if (on) printf("fslog: open \"%s\" mode %d -> %s\n", STR(1), (int)A2, r ? "NOT FOUND" : "ok"); }
     if (r) { wr64(A0, 0); RET(r); return; }
+    if (m->kind == MK_ROM && !_stricmp(rel, "data.arc") && !mod_resources_open((uint64_t)h, path)) {
+        CloseHandle(h); wr64(A0, 0);
+        fprintf(stderr, "MOD RESOURCE ERROR: cannot prepare data.arc; startup stopped. Disable the failing package in Mods and check the preceding mods: error.\n");
+        fflush(stderr);
+        report_and_exit(8);
+        RET(RESULT_GENERIC_FAILURE); return;
+    }
     open_remember(h, (int)(A2 & 7), m);
     wr64(A0, (uint64_t)h);
     RET(0);
 }
-static void fs_CloseFile(Ctx *c) { if (A0) { open_mode((HANDLE)A0, 1); CloseHandle((HANDLE)A0); } }
+static void fs_CloseFile(Ctx *c) { if (A0) { mod_resources_close(A0); open_mode((HANDLE)A0, 1); CloseHandle((HANDLE)A0); } }
 extern int g_hitch_ms; void hitch_note(const char *s);      /* hitch.c: SSBU_HITCH */
 static uint64_t read_at(HANDLE h, int64_t offset, void *buf, uint64_t size) {
     uint64_t total = 0;
     if (g_hitch_ms) { char note[80]; snprintf(note, sizeof note, "read of %llu KB", (unsigned long long)(size >> 10)); hitch_note(note); }
     { void r1_wrote(uint64_t, uint64_t); r1_wrote((uint64_t)(uintptr_t)buf, size); }   /* R1 (r1_state.c): the kernel's write into guest memory is marked (nothing without SSBU_R1_MARK) */
+    { uint64_t got = 0;
+      if (mod_resources_read((uint64_t)h, offset, buf, size, &got)) {
+          if (g_hitch_ms) hitch_note(NULL);
+          return got;
+      }
+    }
     while (total < size) {
         OVERLAPPED ov = {0};
         uint64_t pos = (uint64_t)offset + total;
@@ -572,6 +586,8 @@ static void fs_WriteFile(Ctx *c) {                    /* (handle, offset, buffer
     RET(0);
 }
 static void fs_GetFileSize(Ctx *c) {                  /* (s64 *out, handle) */
+    uint64_t virtual_size;
+    if (mod_resources_size(A1, &virtual_size)) { wr64(A0, virtual_size); RET(0); return; }
     LARGE_INTEGER size;
     if (!GetFileSizeEx((HANDLE)A1, &size)) { RET(RESULT_GENERIC_FAILURE); return; }
     wr64(A0, (uint64_t)size.QuadPart);
@@ -766,30 +782,11 @@ static volatile LONG g_acc_user_open;                    /* the one local user {
 int account_user_is_open(uint64_t lo, uint64_t hi) { return g_acc_user_open && lo == 1 && hi == 0; }
 static void acc_TryOpenPreselectedUser(Ctx *c) { wr64(A0, 1); wr64(A0 + 8, 0); wr64(A0 + 16, 0); InterlockedExchange(&g_acc_user_open, 1); RET(1); }
 static void acc_GetUserId(Ctx *c) { wr64(A0, 1); wr64(A0 + 8, 0); RET(0); }
-/* The nickname of the console user is the name of the Windows user (SSBU_NICKNAME overrides): UTF-8, at most 32
- * bytes, NUL-terminated, in the 33-byte Nickname. */
+/* The explicitly chosen local profile, validated before game startup: UTF-8, <=32 bytes and NUL.
+ * Never infer a game identity from the Windows account. */
 static void acc_GetNickname(Ctx *c) {
-    static char name[33];
-    static volatile LONG ready;
-    if (InterlockedCompareExchange(&ready, 1, 0) == 0) {
-        const char *env = getenv("SSBU_NICKNAME");
-        char utf8[512] = "";
-        if (env && env[0]) snprintf(utf8, sizeof utf8, "%s", env);
-        else {
-            wchar_t wname[257] = L"";
-            DWORD n = 257;
-            if (GetUserNameW(wname, &n)) WideCharToMultiByte(CP_UTF8, 0, wname, -1, utf8, sizeof utf8, NULL, NULL);
-        }
-        if (!utf8[0]) strcpy(utf8, "Player");
-        size_t len = strlen(utf8);
-        if (len > 32) { len = 32; while (len > 0 && ((unsigned char)utf8[len] & 0xc0) == 0x80) len--; }   /* cut between characters */
-        memcpy(name, utf8, len);
-        name[len] = 0;
-        ready = 2;
-    }
-    while (ready != 2) SwitchToThread();
-    memset((void *)(uintptr_t)A0, 0, 33);
-    strcpy((char *)(uintptr_t)A0, name);
+    void ssbu_net_get_profile(char out[33]);
+    ssbu_net_get_profile((char *)(uintptr_t)A0);
     RET(0);
 }
 static void acc_out_true(Ctx *c) { wr8(A0, 1); RET(0); }

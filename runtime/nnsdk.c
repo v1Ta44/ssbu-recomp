@@ -8,6 +8,7 @@
 #include "runtime.h"
 #include "hostrt.h"
 #include "gfx_options.h"
+#include "nvn_lifetime.h"
 
 #define A0 (c->x[0])
 #define A1 (c->x[1])
@@ -121,6 +122,8 @@ static void os_FreeMemoryPages(Ctx *c) {
     if (g_mp_keep < 0) mp_init();
     QueryPerformanceCounter(&t0);
     uint64_t n = A1;
+    uint64_t life = nvn_lifetime_release_begin(A0,A1,g_mp_keep ? NL_CLEAR : NL_DECOMMIT,c->x[30]);
+    int released=1;
     if (g_mp_keep) {
         MEMORY_BASIC_INFORMATION mi;
         uint8_t *p = P(0), *end = p + n;
@@ -131,11 +134,12 @@ static void os_FreeMemoryPages(Ctx *c) {
             p = re;
         }
     } else { void r1_on_decommit(void *, size_t); r1_on_decommit(P(0), (size_t)A1);      /* R1 (r1_state.c): marks the pages (nothing without SSBU_R1_MARK) */
-             cxxrt_mem_changed(A0, A1); VirtualFree(P(0), (SIZE_T)A1, MEM_DECOMMIT); cxxrt_mem_changed(A0, A1); }      // PR #2 (jfb112697): report the decommitted range, before and after
+             cxxrt_mem_changed(A0, A1); released=VirtualFree(P(0), (SIZE_T)A1, MEM_DECOMMIT)!=0; cxxrt_mem_changed(A0, A1); }      // PR #2 (jfb112697): report the decommitted range, before and after
+    nvn_lifetime_release_end(life,released);
     mp_note(1, n, t0);
     RET(0);
 }
-static void os_FreeAddressRegion(Ctx *c) { cxxrt_mem_changed(A0, 0); VirtualFree(P(0), 0, MEM_RELEASE); cxxrt_mem_changed(A0, 0); RET(0); }      // PR #2 (jfb112697): size 0 = the whole region at A0
+static void os_FreeAddressRegion(Ctx *c) { uint64_t life=nvn_lifetime_release_begin(A0,0,NL_RELEASE,c->x[30]); cxxrt_mem_changed(A0, 0); int released=VirtualFree(P(0), 0, MEM_RELEASE)!=0; cxxrt_mem_changed(A0, 0); nvn_lifetime_release_end(life,released); RET(0); }      // PR #2 (jfb112697): size 0 = the whole region at A0
 
 /* ---- more libc */
 static void c_strtol(Ctx *c) {

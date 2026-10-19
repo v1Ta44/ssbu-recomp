@@ -440,6 +440,17 @@ static void check_romfs(void) {
     romfs_fail(msg);
 }
 
+/* Identity is required before SDK/game initialization, including direct and non-Console launches. */
+static void check_player_name(void) {
+    static const char *const selftests[]={"SSBU_SDK_SELFTEST","SSBU_VK_SELFTEST","SSBU_CXXRT_SELFTEST","SSBU_MISC_SELFTEST","SSBU_EH_MAIN_TEST"};
+    for (size_t i=0;i<sizeof selftests/sizeof selftests[0];i++) if (getenv(selftests[i])) return;
+    void ssbu_net_get_profile(char out[33]);
+    int ssbu_net_validate_profile(const char *name);
+    char name[33]; ssbu_net_get_profile(name);
+    if (ssbu_net_validate_profile(name))
+        romfs_fail("An in-game name is required before starting.\n\nFill in the in-game name on SSBU Console's Start page, or set SSBU_NICKNAME explicitly.\nUse 1..32 UTF-8 bytes. Your Windows account name is never used.");
+}
+
 int main(int argc, char **argv) {
     if (argc > 1 && !strcmp(argv[1], "--write-dump")) { int diag_dump_helper(int, char **); return diag_dump_helper(argc, argv); }   /* hostrt.c: minidump of the crashed game, written from outside */
     g_elf = argc > 1 ? argv[1] : "..\\binaries\\13.0.4\\main.elf";
@@ -455,6 +466,7 @@ int main(int argc, char **argv) {
     /* track V: `--prepare-shaders [folder]` translates every stage of the shader containers in the folder (default
      * ..\cache\vk_containers, filled by tools_vk/bnsh_extract.py) into ..\cache\vk; no game, no window, no GPU (nvn_vk_m4.c) */
     if (argc > 1 && !strcmp(argv[1], "--prepare-shaders")) { int nvn_vk_prepare_shaders(const char *); return nvn_vk_prepare_shaders(argc > 2 ? argv[2] : NULL); }
+    check_player_name();
     /* data symbols the game imports from the SDK module get their real values (see gen_sdkdata.py) */
     for (int i = 0; i < sdk_data_count; i++) {
         void *copy = _aligned_malloc(sdk_data[i].size, 16);
@@ -462,6 +474,13 @@ int main(int argc, char **argv) {
         import_set_address(sdk_data[i].name, copy);
     }
     cxxrt_install_data();
+    if (getenv("SSBU_CONSOLE_PIPE")) {         /* the external console (tools/console): network control over a pipe, console_bridge.c */
+        int console_bridge_start(void);
+        if (!console_bridge_start()) return 0;
+    } else if (getenv("SSBU_NET_UI")) {
+        int ssbu_net_ui_start(void);
+        if (!ssbu_net_ui_start()) return 0;
+    } else { void ssbu_net_boot(void); ssbu_net_boot(); }
     check_romfs();
     runtime_init(g_elf, getenv("SSBU_TRACE") ? getenv("SSBU_TRACE") : "boot_trace.txt");
     if (getenv("SSBU_CRASH_TEST")) CloseHandle(CreateThread(NULL, 0, crash_test, NULL, 0, NULL));

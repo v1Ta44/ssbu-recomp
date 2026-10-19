@@ -15,6 +15,7 @@ binaries/
 romfs/
 sysdata/
 userdata*/
+/save/
 htmldoc/
 
 # lifted (recompiled) code and everything built from it

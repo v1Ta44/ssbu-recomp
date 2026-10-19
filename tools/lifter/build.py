@@ -1,10 +1,12 @@
 """Parallel build of the lifted game.
 
     python build.py compile [jobs] [--force]    gen/*.c -> obj/*.obj (only what changed)
-    python build.py link                        obj/*.obj + host sources -> ssbu_native.exe
+    python build.py link [--with-mods] [--with-latency-slider]          obj/*.obj + host sources -> ssbu_native.exe
     python build.py nro <module> [...]          lift + compile + link one DLL per run-time module (see build_nro.py)
 """
 import concurrent.futures
+import hashlib
+import json
 import os
 import subprocess
 import sys
@@ -18,9 +20,8 @@ GEN = os.path.join(HERE, os.environ.get('RECOMP_GEN', 'gen_eh_o2'))      # side-
 OBJ = os.path.join(HERE, os.environ.get('RECOMP_OBJ', 'obj_eh_o1'))
 CLANG = os.environ.get('RECOMP_CLANG', r'C:\llvm-8.0.0\bin\clang.exe')      # scripts\setup.py sets RECOMP_CLANG (LLVM/clang 9.0.0)
 CFLAGS = ['-c', '-O1', '-w', '-fno-strict-aliasing', '-I', HERE, '-I', GEN]
-HOST_SOURCES = ['hostrt.c', 'boot.c', 'nnsdk.c', 'libcxx.c', 'os_threads.c', 'nvn_stub.c', 'nvn_gl.c', 'nvn_vk.c', 'mx_translate.c', 'tex_decode.c', 'nnfs.c', 'clib.c', 'nntime.c', 'nnhid.c', 'nnpad_sdl.c','sdkdata.c', 'display.c', 'nnpl.c', 'nnfontll.c', 'nnmovie.c', 'nnmisc.c', 'nnaudio.c', 'nnro.c', 'nro_registry.c', 'nnmovie_mf.c', 'nniostream.c', 'nncxxrt.c', 'nncxxlib.c', 'nnlibc2.c',
-                'sdklift_gen.c', 'sdklift_rt.c', 'nnsdk2.c', 'nnmii.c', 'nnapplet.c', 'nnalbum.c', 'nnnet.c', 'nnfsdir.c', 'nnunwind.c', 'nvn_sdk.c', 'nvn_c4.c', 'nvn_c5.c', 'hitch.c', 'gfx_options.c', 'debug_mode.c', 'r1_state.c',
-                'loose_host.c']    # the new fighters' file layer (loose_files.c): off unless SSBU_CHARACTERS / SSBU_LOOSE_FILES is set
+HOST_SOURCES = ['hostrt.c', 'boot.c', 'nnsdk.c', 'libcxx.c', 'os_threads.c', 'nvn_stub.c', 'nvn_lifetime.c', 'nvn_gl.c', 'nvn_vk.c', 'mx_translate.c', 'tex_decode.c', 'nnfs.c', 'clib.c', 'nntime.c', 'nnhid.c', 'nnpad_sdl.c','sdkdata.c', 'display.c', 'nnpl.c', 'nnfontll.c', 'nnmovie.c', 'nnmisc.c', 'nnaudio.c', 'nnro.c', 'nro_registry.c', 'nnmovie_mf.c', 'nniostream.c', 'nncxxrt.c', 'nncxxlib.c', 'nnlibc2.c',
+                'sdklift_gen.c', 'sdklift_rt.c', 'nnsdk2.c', 'nnmii.c', 'nnapplet.c', 'nnalbum.c', 'nnnet.c', 'nnfsdir.c', 'nnunwind.c', 'nvn_sdk.c', 'nvn_c4.c', 'nvn_c5.c', 'hitch.c', 'gfx_options.c', 'debug_mode.c', 'r1_state.c', 'yuzu_net.c', 'yuzu_ldn.c', 'yuzu_socket.c', 'yuzu_ui.c', 'console_bridge.c', 'mod_resources.c', 'loose_host.c']
 # A handful of files hold functions so large that clang -O1 needs more than an hour on them;
 # pass --opt=-O0 to compile whatever is still missing without optimization.
 OPT = next((a.split('=', 1)[1] for a in sys.argv if a.startswith('--opt=')), '-O1')
@@ -117,21 +118,54 @@ def compile_host(job):
 
 
 def cmd_link():
-    if build_game_dll():
+    if '--with-mods' in sys.argv and '--without-mods' in sys.argv:
+        raise SystemExit('choose --with-mods or --without-mods')
+    if '--with-latency-slider' in sys.argv and '--without-latency-slider' in sys.argv:
+        raise SystemExit('choose --with-latency-slider or --without-latency-slider')
+    latency_slider = '--with-latency-slider' in sys.argv
+    delay_stamp = os.path.join(HERE, 'net_delay', 'build.json')
+    delay_hash = None
+    if latency_slider:
+        with open(delay_stamp, 'rb') as f:
+            data = f.read()
+            delay_hash = hashlib.sha256(data).hexdigest()
+            delay_artifacts = json.loads(data)['artifacts_sha256']
+        for relative, expected in delay_artifacts.items():
+            with open(os.path.join(HERE, relative), 'rb') as f:
+                if hashlib.sha256(f.read()).hexdigest() != expected:
+                    raise SystemExit('online delay artifact changed: ' + relative)
+    HOST_FLAGS[:] = [f for f in HOST_FLAGS if not f.startswith('-DSSBU_ENABLE_NET_DELAY=')]
+    HOST_FLAGS.append('-DSSBU_ENABLE_NET_DELAY=%d' % latency_slider)
+    resource_mods = '--with-mods' in sys.argv
+    HOST_FLAGS[:] = [f for f in HOST_FLAGS if not f.startswith('-DSSBU_ENABLE_RESOURCE_MODS=')]
+    HOST_FLAGS.append('-DSSBU_ENABLE_RESOURCE_MODS=%d' % resource_mods)
+    import build_network
+    network_includes, network_objects = build_network.prepare(CLANG, HERE)
+    HOST_FLAGS.extend(network_includes)
+    if '--host-only' not in sys.argv and build_game_dll():
         return 1
     exe = os.environ.get('RECOMP_EXE', 'ssbu_native.exe')      # parallel work: one exe name per worker
     out = os.path.join(HERE, exe)
     objdir = os.path.join(HERE, 'obj_host', os.path.splitext(exe)[0])
     os.makedirs(objdir, exist_ok=True)
+    flags_path = os.path.join(objdir, 'build-flags.json')
+    try:
+        with open(flags_path, encoding='utf-8') as f:
+            flags_changed = json.load(f) != HOST_FLAGS
+    except (OSError, ValueError):
+        flags_changed = True
     t0 = time.time()
     newest_dep = max([os.path.getmtime(os.path.join(HERE, h)) for h in os.listdir(HERE) if h.endswith(('.h', '.inc'))] + [os.path.getmtime(os.path.join(HERE, 'build.py'))])
     # nvn_vk.c includes the other nvn_vk*.c files as one translation unit: an edit of one of them must rebuild nvn_vk.obj
     newest_vk = max(os.path.getmtime(os.path.join(HERE, n)) for n in os.listdir(HERE) if n.startswith('nvn_vk') and n.endswith('.c'))
+    newest_sdk = max(os.path.getmtime(os.path.join(d, n))
+                     for d, _, names in os.walk(os.path.join(HERE, 'fighter_sdk'))
+                     for n in names if n.endswith(('.c', '.h', '.inc')))
     objs, jobs = [], []
     for n in HOST_SOURCES + ['gamedll.c']:
         src, obj = os.path.join(HERE, n), os.path.join(objdir, n[:-2] + '.obj')
         objs.append(obj)
-        if not os.path.exists(obj) or os.path.getmtime(obj) < max(os.path.getmtime(src), newest_dep, newest_vk if n == 'nvn_vk.c' else 0):
+        if flags_changed or not os.path.exists(obj) or os.path.getmtime(obj) < max(os.path.getmtime(src), newest_dep, newest_vk if n == 'nvn_vk.c' else 0, newest_sdk if n == 'nnro.c' else 0):
             jobs.append((src, obj))
     failed = 0
     with concurrent.futures.ThreadPoolExecutor(16) as pool:
@@ -141,12 +175,20 @@ def cmd_link():
                 print('FAILED %s\n%s' % (os.path.basename(src), err))
     if failed:
         return 1
-    r = subprocess.run([CLANG] + objs + [os.path.join(HERE, GAME_DLL[:-4] + '.lib'), os.path.join(SDL_DIR, 'SDL3.lib')] + LIBS + debug_link_flags(out) + ['-o', out], capture_output=True, text=True, errors='replace')
+    r = subprocess.run([CLANG] + objs + network_objects + [os.path.join(HERE, GAME_DLL[:-4] + '.lib'), os.path.join(SDL_DIR, 'SDL3.lib')] + LIBS + debug_link_flags(out) + ['-o', out], capture_output=True, text=True, errors='replace')
     if r.returncode == 0:
         import shutil
         shutil.copy2(os.path.join(SDL_DIR, 'SDL3.dll'), os.path.join(HERE, 'SDL3.dll'))
     print((r.stdout + r.stderr)[-4000:])                 # link.exe reports its errors on stdout
     if r.returncode == 0:
+        with open(out, 'rb') as f:
+            exe_hash = hashlib.sha256(f.read()).hexdigest()
+        with open(os.path.splitext(out)[0] + '.build.json', 'w', encoding='utf-8') as f:
+            json.dump({'schema_version': 2, 'resource_mods': resource_mods, 'latency_slider': latency_slider, 'latency_slider_sha256': delay_hash, 'exe_sha256': exe_hash}, f, indent=2)
+        with open(flags_path, 'w', encoding='utf-8') as f:
+            json.dump(HOST_FLAGS, f)
+        print('resource package extension: %s' % ('enabled' if resource_mods else 'disabled'))
+        print('online delay controls: %s' % ('enabled' if latency_slider else 'disabled'))
         print('linked %s: %.1f MB in %.1fs (%d host files recompiled)' % (out, os.path.getsize(out) / 1048576.0, time.time() - t0, len(jobs)))
     return r.returncode
 

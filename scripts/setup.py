@@ -24,6 +24,7 @@ Environment variables named RECOMP_* / SSBU_* are removed from the children's en
 options below, from LLVM_ROOT / SDL3_ROOT / VULKAN_HEADERS / GLSLANG_ROOT / SUYU_ROOT, or from <repo>/deps/<name>.
 libopus (the music) is optional: --opus, OPUS_DLL or <repo>/deps/opus; without it the build ends with a warning and the
 game's Opus streams are silent.
+Optional extensions default off: --with-mods builds resource packages; --with-latency-slider builds online delay controls.
 """
 import argparse
 import json
@@ -147,6 +148,10 @@ def step_deps(cx):
     if missing:
         raise Fail('missing Python packages: %s   (pip install %s)' % (', '.join(missing), ' '.join(missing)))
     say('  python packages: numpy lz4 zstandard Pillow unicorn: ok')
+    if a.with_mods and not shutil.which('cargo'):
+        raise Fail('--with-mods needs Rust/Cargo for x64 Windows (scripts/build_mod_backend.py)')
+    say('  resource package extension: %s' % ('enabled (Rust/Cargo required)' if a.with_mods else 'disabled'))
+    say('  online delay controls: %s' % ('enabled (MSVC and WebView2 SDK required)' if a.with_latency_slider else 'disabled'))
 
     deps = os.path.join(REPO, 'deps')
     llvm = find_first([a.llvm, os.environ.get('LLVM_ROOT'), r'C:\llvm-9.0.0', r'C:\Program Files\LLVM', os.path.join(deps, 'llvm')],
@@ -387,8 +392,18 @@ def step_nro(cx):
 
 
 def step_link(cx):
+    if cx.a.with_latency_slider:
+        if cx.state.get('game_version', '13.0.4') != '13.0.4':
+            raise Fail('online delay controls are verified for 13.0.4 only; use --without-latency-slider for 13.0.5')
+        try:
+            from .build_latency_slider import build_extension
+        except ImportError:
+            from build_latency_slider import build_extension
+        build_extension(cx.work, cx.tools['clang'], os.path.join(cx.bin, 'main.elf'))
+    if cx.a.with_mods:
+        cx.run('link', [sys.executable, os.path.join(REPO, 'scripts', 'build_mod_backend.py'), '--output', cx.work, '--target-dir', os.path.join(cx.build, 'mod-backend-target')], cwd=REPO, env=cx.env(), log='link_mod_backend')
     cx.run('link', [os.environ.get('COMSPEC', 'cmd.exe'), '/c', os.path.join(cx.work, 'build_glslang.bat')], env=cx.env())
-    cx.run('link', [sys.executable, 'build.py', 'link'], env=cx.env(**{k: v for k, v in build_env(cx).items() if k != 'RECOMP_NRO_SUFFIX'}, RECOMP_EXE=EXE))
+    cx.run('link', [sys.executable, 'build.py', 'link', '--with-mods' if cx.a.with_mods else '--without-mods', '--with-latency-slider' if cx.a.with_latency_slider else '--without-latency-slider'], env=cx.env(**{k: v for k, v in build_env(cx).items() if k != 'RECOMP_NRO_SUFFIX'}, RECOMP_EXE=EXE))
     exe = os.path.join(cx.work, EXE)
     for f in (EXE, 'SDL3.dll', 'ssbu_glslang.dll', 'ssbu_game_eh_o1.dll'):
         if not os.path.exists(os.path.join(cx.work, f)):
@@ -401,6 +416,7 @@ def step_link(cx):
                                                                                          ', ' + name if opus else ''))
     if not opus:
         say('  WARNING: no libopus: music and the other Opus sounds will be silent (deps step above; BUILDING.md)')
+    cx.state.setdefault('features', {}).update(resource_mods=cx.a.with_mods, latency_slider=cx.a.with_latency_slider)
 
 
 def game_env(cx, **extra):
@@ -467,6 +483,13 @@ def main():
     ap.add_argument('--glslang', help='glslang windows-x86_64 release folder (include\\, lib\\)')
     ap.add_argument('--suyu', help='source checkout of a yuzu-family emulator (only src\\core\\hle\\service\\mii is read)')
     ap.add_argument('--opus', help='libopus DLL (opus.dll or libopus-0.dll) or the folder holding it: the music (optional, BUILDING.md)')
+    mods = ap.add_mutually_exclusive_group()
+    mods.add_argument('--with-mods', action='store_true', help='enable ARCropolis-style resource packages (requires Rust/Cargo)')
+    mods.add_argument('--without-mods', dest='with_mods', action='store_false', help='disable resource packages (default; no mod backend build)')
+    delay = ap.add_mutually_exclusive_group()
+    delay.add_argument('--with-latency-slider', action='store_true', help='enable online delay slider and overlay (requires MSVC and WebView2 SDK)')
+    delay.add_argument('--without-latency-slider', dest='with_latency_slider', action='store_false', help='disable online delay controls (default; no extension dependencies)')
+    ap.set_defaults(with_mods=False, with_latency_slider=False)
     ap.add_argument('--sdk-roots', help='another list of SDK functions to lift (default: tools/lifter/sdklift_roots.txt)')
     ap.add_argument('--modules', help='script modules to build: all (default) or a comma list, e.g. lua2cpp_common,lua2cpp_mario')
     ap.add_argument('--redo', help='repeat this step')
@@ -489,6 +512,11 @@ def main():
     todo = STEPS
     done = cx.state.setdefault('done', {})
     force = set()
+    # Changing the feature must relink even when setup resumes a completed build.
+    if (cx.state.get('features', {}).get('resource_mods') is not a.with_mods
+            or cx.state.get('features', {}).get('latency_slider', False) is not a.with_latency_slider):
+        force.add('link')
+        done.pop('check', None)
     for opt in (a.redo, a.from_step, a.only):
         if opt and opt not in STEPS:
             say('unknown step %s (steps: %s)' % (opt, ' '.join(STEPS)))

@@ -1,0 +1,536 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>SSBU Console</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body data-page="start">
+<div class="shell">
+  <nav class="rail" aria-label="页面">
+    <div class="wordmark" aria-hidden="true"><b>SSBU</b><span>Console</span></div>
+    <button class="tile" data-page="start" aria-current="page"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4l13 8-13 8z"/></svg><span>开始</span></button>
+    <button class="tile" data-page="graphics"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h18v11H3zM9 20h6M12 16v4" fill="none" stroke-width="2.4"/></svg><span>画面</span></button>
+    <button class="tile" data-page="pads"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 7h12a4 4 0 014 4l1 5a3 3 0 01-5 2l-2-3H8l-2 3a3 3 0 01-5-2l1-5a4 4 0 014-4z"/></svg><span>控制器</span></button>
+    <button class="tile" data-page="mods"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h7l2-3h9v16H3z" fill="none" stroke-width="2.2"/><path d="M8 13h8M12 9v8" fill="none" stroke-width="2.2"/></svg><span>模组</span></button>
+    <button class="tile" data-page="online"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="3"/><circle cx="19" cy="5" r="3"/><circle cx="19" cy="19" r="3"/><path d="M5 12L19 5M5 12l14 7" fill="none" stroke-width="2.2"/></svg><span>联机</span></button>
+    <button class="tile" data-page="debug"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6l-6 6 6 6M16 6l6 6-6 6" fill="none" stroke-width="2.6"/></svg><span>调试</span></button>
+    <div class="plate" id="railState" role="status" aria-live="polite" data-s="idle">
+      <i></i><span class="txt">未运行</span><span class="sub" id="railSub"></span>
+    </div>
+  </nav>
+
+  <main id="main">
+    <div class="wipe" aria-hidden="true"></div>
+    <div class="savepill" id="savePill" role="status" aria-live="polite"></div>
+
+    <!-- ======================================================== 开始 -->
+    <section class="page" id="page-start">
+      <div class="cover" id="cover" aria-hidden="true"></div>
+      <div class="burst" aria-hidden="true"></div>
+      <div class="hero">
+        <div class="fatal" id="fatalBox" role="alert" hidden></div>
+        <div class="start-profile" id="startProfile">
+          <label class="field" for="gameName">
+            <span class="name-label"><span>游戏内名字 <small>必填</small></span><span id="gameNameCount">0 / 32 字节</span></span>
+            <input id="gameName" type="text" required maxlength="32" autocomplete="off" spellcheck="false" placeholder="填写你要在游戏中使用的名字" aria-describedby="gameNameHint" disabled>
+          </label>
+          <p class="hint" id="gameNameHint" role="status">请先填写游戏内名字，再启动游戏。</p>
+        </div>
+        <button class="launch" id="btnLaunch" disabled>
+          <span class="launch-face"><span class="launch-word" id="launchWord">开始游戏</span><span class="launch-sub" id="launchSub"></span></span>
+        </button>
+        <div class="modes" id="modes" role="radiogroup" aria-label="启动方式">
+          <label><input type="radio" name="mode" value="play" checked><span>游戏</span></label>
+          <label><input type="radio" name="mode" value="smoke"><span>冒烟测试</span></label>
+        </div>
+        <p class="mode-note" id="modeNote"></p>
+        <div class="run-actions" id="runActions" hidden>
+          <button class="btn" id="btnGoOnline" hidden>连接服务器</button>
+          <button class="btn" id="btnGoLog">看日志</button>
+          <button class="btn danger" id="btnKill">强制结束</button>
+        </div>
+        <div class="lastrun" id="lastRun" hidden></div>
+      </div>
+
+      <aside class="update-card" id="updateCard" aria-labelledby="updateTitle">
+        <div class="update-top"><div><h2 id="updateTitle">版本与更新</h2><p id="updateCurrent">正在读取版本…</p></div>
+          <div class="update-actions"><button class="btn small" id="updateCheck">检查更新</button><button class="btn small" id="updateImport">从文件更新</button></div></div>
+        <p id="updateMessage" role="status" aria-live="polite">可手动检查更新。</p>
+        <p class="hint" id="updateChecked"></p>
+        <progress id="updateProgress" max="1" value="0" hidden aria-label="更新进度"></progress>
+        <div id="updateReady" class="update-ready" hidden><b id="updateReadyTitle"></b><p id="updateReadyNote"></p><button class="btn primary" id="updateInstall">退出并安装</button><span class="hint">安装完成后自动重新打开控制台。</span></div>
+        <details class="update-details"><summary>更新说明与下载来源</summary>
+          <p class="update-notes" id="updateNotes">检查更新后查看版本说明。</p>
+          <div id="updateSourcesBox" hidden><label class="field"><span>下载来源</span><select id="updateSource"></select></label><p class="hint" id="updateSourceNote"></p><button class="btn small" id="updateDownload">下载并准备更新</button><button class="linkbtn" id="updateCancel" hidden>取消下载</button></div>
+          <div class="update-preferences"><label><input type="checkbox" id="updateStartup"> 打开控制台后检查更新</label><button class="linkbtn" id="updateRollback" hidden>恢复上一版本</button></div>
+          <p class="hint">更新保留存档、模组、配置和缓存。网盘下载的更新文件，可用“从文件更新”安装。</p>
+          <details class="help"><summary>在线来源设置</summary><p class="hint">每行一个版本清单的 HTTPS 地址，最多四个。备用来源使用同一发行签名。</p><textarea id="updateFeeds" rows="3" spellcheck="false" aria-label="版本清单来源"></textarea><button class="btn small" id="updateSaveFeeds">保存来源</button></details>
+          <p class="hint" id="updateLastResult"></p>
+          <details class="help" id="updateErrorDetails" hidden><summary>连接与安装详情</summary><pre id="updateErrorText" class="update-notes"></pre></details>
+        </details>
+      </aside>
+
+      <details class="drawer" id="drawer">
+        <summary><b>详情</b><span id="drawerSum">启动前检查、游戏数据位置、运行记录</span></summary>
+        <div class="drawer-body">
+          <div class="col">
+            <h3>启动前检查</h3>
+            <ul class="checks" id="checks"></ul>
+            <dl class="meta" id="launchMeta"></dl>
+            <details class="help"><summary>这些检查是什么</summary>
+              <p>每次启动前都会检查：游戏数据 data.arc 和它旁边的 .nrr 文件夹（缺了 .nrr，游戏会停在对战前的加载画面）、Media Foundation、Vulkan 驱动、包里的文件是否完整。红色项目会阻止启动，黄色只是提醒。</p>
+            </details>
+          </div>
+          <div class="col">
+            <h3>游戏数据</h3>
+            <label class="field">
+              <span class="lbl">RomFS 文件夹</span>
+              <input id="romfs" type="text" spellcheck="false" placeholder="留空 = 包内的 romfs 文件夹">
+              <span class="hint" id="romfsDefault"></span>
+            </label>
+            <label class="field">
+              <span class="lbl">存档文件夹</span>
+              <input id="userdata" type="text" spellcheck="false" placeholder="留空 = 包内的 userdata 文件夹">
+            </label>
+            <details class="help"><summary>RomFS 文件夹放什么</summary>
+              <p>你自己的游戏备份里放 data.arc 的那个文件夹，整个复制过来，包括以点开头的隐藏文件夹 .nrr。相对路径以包的根文件夹为起点。改完按回车或点别处即保存。</p>
+            </details>
+            <h3>背景图</h3>
+            <div class="cover-set">
+              <span class="cover-thumb" id="coverThumb" aria-hidden="true"></span>
+              <span class="cover-acts">
+                <button class="btn small" type="button" id="coverPick">选择图片</button>
+                <button class="linkbtn" type="button" id="coverClear" hidden>移除</button>
+              </span>
+              <input type="file" id="coverFile" accept="image/jpeg,image/png,image/webp" hidden>
+            </div>
+            <details class="help"><summary>放什么图</summary>
+              <p>开始页的背景，例如你自己那份游戏的封面。控制台不自带图片。图片会被调暗，复制到 config 文件夹的 cover 文件里，原文件可以删掉。支持 JPEG、PNG、WebP，最大 24 MB。</p>
+            </details>
+          </div>
+          <div class="col">
+            <h3>运行记录</h3>
+            <ol class="sessions" id="sessions"></ol>
+          </div>
+        </div>
+      </details>
+    </section>
+
+    <!-- ======================================================== 画面 -->
+    <section class="page" id="page-graphics" hidden>
+      <header class="banner"><h1>画面</h1><p>改动立即保存，下一次启动游戏时生效。游戏里按 F11 可随时切换窗口和全屏。</p></header>
+      <form id="gfxForm" class="rows" autocomplete="off">
+        <div class="row">
+          <div class="row-head"><h2>预设</h2></div>
+          <div class="chips">
+            <label><input type="radio" name="profile" value="custom"><span>自定义<small>按下面各项</small></span></label>
+            <label><input type="radio" name="profile" value="low"><span>低配<small>核显、弱显卡</small></span></label>
+          </div>
+          <details class="help"><summary>低配会改什么</summary>
+            <p>低配会覆盖三项：内部分辨率 0.5，各向异性过滤用游戏自己的值，垂直同步用程序时钟。实测 Intel 核显上每个战斗帧的显卡时间从 9.0 毫秒降到 4.2 毫秒。你在下面的设置仍然保留在文件里，切回自定义后恢复。</p>
+          </details>
+        </div>
+
+        <div class="row">
+          <div class="row-head"><h2>渲染器</h2></div>
+          <div class="chips">
+            <label><input type="radio" name="renderer" value="vulkan"><span>Vulkan<small>默认</small></span></label>
+            <label><input type="radio" name="renderer" value="opengl"><span>OpenGL<small>备用，仅 NVIDIA</small></span></label>
+          </div>
+        </div>
+
+        <div class="row">
+          <div class="row-head"><h2>窗口</h2></div>
+          <div class="chips">
+            <label><input type="radio" name="window" value="windowed"><span>窗口</span></label>
+            <label><input type="radio" name="window" value="borderless"><span>无边框<small>铺满当前显示器</small></span></label>
+            <label><input type="radio" name="window" value="fullscreen"><span>全屏<small>无边框且置顶</small></span></label>
+          </div>
+          <details class="help"><summary>说明</summary>
+            <p>全屏不会切换显示器分辨率（独占全屏还没有实现）。画面始终保持 16:9，其他比例的窗口会出现黑边。</p>
+          </details>
+        </div>
+
+        <div class="row" id="rowVsync">
+          <div class="row-head"><h2>垂直同步</h2><span class="locked" hidden>低配预设固定为程序时钟</span></div>
+          <div class="chips">
+            <label><input type="radio" name="vsync" value="auto"><span>自动<small>推荐</small></span></label>
+            <label><input type="radio" name="vsync" value="display"><span>跟随显示器</span></label>
+            <label><input type="radio" name="vsync" value="clock"><span>程序时钟</span></label>
+            <label><input type="radio" name="vsync" value="off"><span>关闭</span></label>
+            <label><input type="radio" name="vsync" value="mailbox"><span>Mailbox</span></label>
+            <label><input type="radio" name="vsync" value="on"><span>交换链 FIFO</span></label>
+          </div>
+          <details class="help"><summary>这几种有什么不同</summary>
+            <dl class="explain">
+              <dt>自动</dt><dd>启动时测量刷新率。60、120、240 Hz 用“跟随显示器”，其他刷新率（75、144、165 Hz 等）用“程序时钟”。</dd>
+              <dt>跟随显示器</dt><dd>游戏的帧时钟就是显示器的刷新：每帧在屏幕上停留时间完全相同，不撕裂。刷新率不是 60 的倍数时自动退回“程序时钟”。</dd>
+              <dt>程序时钟</dt><dd>程序自己的 60 Hz 时钟。刷新率不是 60/120/240 的显示器上，偶尔有帧多停一次刷新，这无法避免。</dd>
+              <dt>关闭</dt><dd>画好就立即显示，允许撕裂，延迟最低。仍然是每秒 60 帧。</dd>
+              <dt>Mailbox</dt><dd>与程序时钟相同，但只用 mailbox 呈现模式。</dd>
+              <dt>交换链 FIFO</dt><dd>交换链自己的垂直同步加上程序时钟，两个时钟并存，不推荐。</dd>
+            </dl>
+            <p>OpenGL 渲染器不读取这一项。</p>
+          </details>
+        </div>
+
+        <div class="row">
+          <div class="row-head"><h2>输入延迟</h2></div>
+          <div class="chips">
+            <label><input type="radio" name="latency" value="normal"><span>标准</span></label>
+            <label><input type="radio" name="latency" value="low"><span>低</span></label>
+            <label><input type="radio" name="latency" value="lowest"><span>最低</span></label>
+          </div>
+          <details class="help"><summary>说明</summary>
+            <dl class="explain">
+              <dt>标准</dt><dd>游戏在时钟节拍时开始一帧。</dd>
+              <dt>低</dt><dd>游戏在每帧较晚的时候才开始，刚好赶在下一节拍前画完，所以读手柄晚 2–5 毫秒，离显示更近。节奏不变；四人对战时慢帧可能稍多。</dd>
+              <dt>最低</dt><dd>在“低”的基础上，画好就立即送到窗口，不等节拍：再少约 4 毫秒，但每帧停留时间不再完全相同（会有轻微抖动）。</dd>
+            </dl>
+            <p>仅 Vulkan。</p>
+          </details>
+        </div>
+
+        <div class="row" id="rowScale">
+          <div class="row-head"><h2>内部分辨率</h2><span class="locked" hidden>低配预设固定为 0.5</span></div>
+          <div class="scale">
+            <output class="readout" id="scaleOut" for="scale"></output>
+            <div class="scale-ctl">
+              <input type="range" id="scale" min="0.25" max="2" step="0.05" aria-label="内部分辨率倍数">
+              <div class="ticks" id="scalePresets">
+                <button type="button" data-v="0.5">0.5</button>
+                <button type="button" data-v="0.75">0.75</button>
+                <button type="button" data-v="1">1.0</button>
+                <button type="button" data-v="1.5">1.5</button>
+                <button type="button" data-v="2">2.0</button>
+              </div>
+            </div>
+          </div>
+          <details class="help"><summary>说明</summary>
+            <p>1.0 是游戏原本的 1920×1080。低于 1.0 时整个画面（包括 2D 界面）按更小尺寸绘制再放大到窗口，是弱显卡最有效的开关，界面会变软。高于 1.0 是超采样，只适合强显卡：显卡时间和显存随倍数的平方增长。2.0 = 3840×2160。仅 Vulkan，OpenGL 忽略这一项。</p>
+          </details>
+        </div>
+      </form>
+      <p class="path" id="gfxPath"></p>
+    </section>
+
+    <!-- ======================================================== 控制器 -->
+    <section class="page" id="page-pads" hidden>
+      <header class="banner"><h1>控制器</h1></header>
+      <div class="subtabs" role="tablist" aria-label="控制器设置">
+        <button role="tab" data-sub="map" aria-selected="true">按键映射</button>
+        <button role="tab" data-sub="slots" aria-selected="false">玩家槽位</button>
+        <button role="tab" data-sub="general" aria-selected="false">通用</button>
+      </div>
+
+      <div class="sub" id="sub-map">
+        <div class="devbar">
+          <div class="cards" id="padCards" role="listbox" aria-label="要设置的设备"></div>
+          <div class="target" id="target"></div>
+        </div>
+        <p class="padnote" id="padNote"></p>
+        <div class="mapper" id="mapper">
+          <div class="stage">
+            <div class="pad" id="pad"></div>
+            <div class="editor" id="editor" hidden></div>
+            <p class="stage-hint">点手柄上的按键，或者右边列表里的一行，就能修改它。</p>
+          </div>
+          <div class="binds" id="binds"></div>
+        </div>
+        <details class="help"><summary>映射怎么写</summary>
+          <p>每个 Pro 按键可以填一个或多个来源，用逗号分隔，任意一个按下都算。SDL 认识的手柄用名称：south（下）east（右）west（左）north（上）、leftshoulder、dpup、lefttrigger、leftx+ 等；任何设备都可以用编号：button3、axis2+、hat0up。“默认”= 这个设备本来的映射，“不映射”= 这个键不起作用。</p>
+          <p>“无映射”的设备是 SDL 不认识的手柄，当作普通摇杆打开，按键顺序是猜的，用“逐键录入”一次设好全部按键最快。</p>
+        </details>
+      </div>
+
+      <div class="sub" id="sub-slots" hidden>
+        <p class="lede">每个玩家用哪个设备。自动 = 手柄连接时占第一个空槽位，断开后重新连上会回到原来的槽位。</p>
+        <div class="slots" id="slots"></div>
+        <details class="help"><summary>固定设备有什么用</summary>
+          <p>指定设备后，这个槽位只留给它，即使它晚连接也一样。“无人”表示这个槽位不使用。</p>
+        </details>
+      </div>
+
+      <div class="sub" id="sub-general" hidden>
+        <form class="rows" id="padGeneral" autocomplete="off">
+          <div class="row">
+            <div class="row-head"><h2>面键布局</h2></div>
+            <div class="chips">
+              <label><input type="radio" name="layout" value="auto"><span>自动</span></label>
+              <label><input type="radio" name="layout" value="positional"><span>按位置</span></label>
+              <label><input type="radio" name="layout" value="labels"><span>按标签</span></label>
+            </div>
+            <details class="help"><summary>说明</summary>
+              <dl class="explain">
+                <dt>按位置</dt><dd>任天堂 A 键的位置（右）算 A：右 = A，下 = B，上 = X，左 = Y。Xbox 手柄的 B 键会当作 A。</dd>
+                <dt>按标签</dt><dd>按印的字母算：Xbox 手柄的 A 就是 Pro 手柄的 A。</dd>
+                <dt>自动</dt><dd>GameCube 手柄按标签，其他按位置。</dd>
+              </dl>
+            </details>
+          </div>
+          <div class="row">
+            <div class="row-head"><h2>摇杆</h2></div>
+            <div class="zone">
+              <div class="zone-viz" id="zoneViz" aria-hidden="true"><i class="outer"></i><i class="inner"></i><b></b></div>
+              <div class="sliders">
+                <label class="slider"><span class="lbl">死区</span><input type="range" name="deadzone" min="0" max="0.9" step="0.01"><output></output></label>
+                <label class="slider"><span class="lbl">外圈</span><input type="range" name="outer_zone" min="0.1" max="1" step="0.01"><output></output></label>
+              </div>
+            </div>
+            <details class="help"><summary>说明</summary>
+              <p>以满行程为 1。死区以内不算推动；超过外圈算推满；中间重新缩放，长度不超过 1（圆形边界）。默认 0.10 和 0.98。左边的圆是示意：内圈 = 死区，外圈 = 推满的位置。</p>
+            </details>
+          </div>
+          <div class="row">
+            <div class="row-head"><h2>扳机</h2></div>
+            <div class="sliders">
+              <label class="slider"><span class="lbl">按下阈值</span><input type="range" name="trigger_threshold" min="0.01" max="1" step="0.01"><output></output></label>
+            </div>
+            <details class="help"><summary>说明</summary>
+              <p>扳机（或任何映射到按键的轴）推到这个位置（0–1）算按下 ZL / ZR。默认 0.33。</p>
+            </details>
+          </div>
+          <div class="row">
+            <div class="row-head"><h2>震动</h2></div>
+            <div class="sliders">
+              <label class="toggle"><input type="checkbox" name="rumble"><span>开启震动</span></label>
+              <label class="slider"><span class="lbl">强度</span><input type="range" name="rumble_strength" min="0" max="2" step="0.1"><output></output></label>
+            </div>
+          </div>
+          <div class="row">
+            <div class="row-head"><h2>不使用的设备</h2></div>
+            <ul class="taglist" id="ignoreList"></ul>
+            <div class="inline-add">
+              <input type="text" id="ignoreAdd" placeholder="设备 GUID（32 位十六进制）" spellcheck="false" aria-label="设备 GUID">
+              <button type="button" class="btn" id="ignoreAddBtn">添加</button>
+            </div>
+            <details class="help"><summary>什么时候用</summary>
+              <p>有些键盘接收器或外设会把自己伪装成摇杆，占掉一个玩家槽位。把它的 GUID 加进来，游戏就不会再使用它。更简单的办法：在“按键映射”里选中那个设备，点“不使用这个设备”。</p>
+            </details>
+          </div>
+        </form>
+      </div>
+      <p class="path" id="padPath"></p>
+    </section>
+
+    <!-- ======================================================== 模组 -->
+    <section class="page" id="page-mods" hidden>
+      <header class="banner"><h1>模组</h1><p>管理资源包。改动自动保存，下一次启动游戏时生效。</p></header>
+      <div class="mods-status" id="modsStatus" role="status" aria-live="polite">
+        <span class="badge" id="modsBadge">检测中</span><span id="modsReason">正在检查当前构建…</span>
+      </div>
+      <div class="mods-tools actions">
+        <label class="field grow"><span class="lbl">查找模组</span><input type="search" id="modsSearch" placeholder="名称、别名、角色或资源类型" autocomplete="off"></label>
+        <button class="btn primary" id="modsImportZip" disabled>导入 ZIP</button>
+        <button class="btn" id="modsImportFolder" disabled>导入文件夹</button>
+        <button class="btn" id="modsOpen" disabled>打开模组目录</button>
+        <button class="linkbtn" id="modsRefresh">刷新</button>
+      </div>
+      <div class="mods-count" id="modsCount"></div>
+      <p class="hint" id="modsRunNote" hidden>游戏运行中，可以查看模组；关闭游戏后可修改。</p>
+      <div class="mods-list" id="modsList" aria-busy="false"></div>
+      <details class="help">
+        <summary>安装目录、槽位和兼容范围</summary>
+        <p>每个模组放在包根目录的 mods/模组名/ 下，与 game 文件夹同级。导入会识别压缩包内的 ultimate/mods 外层，并保留原文件。删除会移入 mods/.trash 回收区。</p>
+        <p>内容标签由资源路径自动识别，包含替换和新增资源。槽位按“第 1 套 = c00”显示，只映射能够识别的服装及配套资源；公共资源保持公共。第 9 套起的额外槽位仍需要游戏对应的选择和运行支持。</p>
+        <p>带 Switch 插件的包会单独标记，不能仅靠资源后端运行；这类包以及无法解析的哈希配置不支持自动改槽位。同路径覆盖提示表示多个启用包提供了相同文件。</p>
+      </details>
+      <p class="path" id="modsPath"></p>
+    </section>
+
+    <!-- ======================================================== 联机 -->
+    <section class="page" id="page-online" hidden>
+      <header class="banner"><h1>联机</h1><p>照常启动游戏，需要联机时在这里连接 Yuzu 房间服务器，再在游戏里选择“本地无线”。</p></header>
+      <ol class="stepper" id="netSteps">
+        <li data-step="game"><b>1</b><span>启动游戏</span></li>
+        <li data-step="join"><b>2</b><span>加入服务器房间</span></li>
+        <li data-step="enter"><b>3</b><span>在游戏里选择本地无线</span></li>
+      </ol>
+      <div class="online">
+        <form class="panel" id="netForm" autocomplete="off">
+          <div class="grid2 hostport">
+            <label class="field"><span class="lbl">服务器地址</span><input name="host" required spellcheck="false" maxlength="255"></label>
+            <label class="field"><span class="lbl">UDP 端口</span><input name="port" type="number" min="1" max="65535" value="24872" required></label>
+          </div>
+          <label class="field"><span class="lbl">房间昵称</span><input name="nickname" required maxlength="20" pattern="[A-Za-z0-9 ._\-]{4,20}" spellcheck="false"></label>
+          <p class="hint">游戏内名字在开始页统一设置。<button type="button" class="linkbtn" id="netGoName">前往设置</button></p>
+          <details class="help"><summary>两个名字的区别</summary>
+            <p>房间昵称给服务器看，原版服务器要求 4–20 个英文字母、数字、空格或 ._-，同一房间里不能重名。游戏内名字是 SSBU 里显示的名字，在开始页设置，可以用中文，最多 32 字节，对所有启动方式生效。</p>
+          </details>
+          <div class="grid2">
+            <label class="field"><span class="lbl">房间密码</span><input name="password" type="password" maxlength="127"></label>
+            <label class="field"><span class="lbl">Token</span><input name="token" type="password" maxlength="4095" placeholder="不需要就留空"></label>
+          </div>
+          <details class="help"><summary>密码会被保存吗</summary>
+            <p>不会。密码和 Token 只在加入房间时经管道交给游戏，不写进配置、会话记录或日志。地址、端口和昵称保存在 launcher.ini 里。</p>
+          </details>
+          <div class="actions">
+            <button class="btn primary big" type="button" id="netGo">前往开始页</button>
+            <button class="btn" type="button" id="netLeave" disabled>离开房间</button>
+          </div>
+          <p class="hint">不连接服务器也可以正常游玩。请在进入游戏的本地无线模式前完成连接。</p>
+          <p class="netmsg" id="netMsg" role="status" aria-live="polite"></p>
+        </form>
+
+        <div class="panel room" id="room">
+          <div class="room-head">
+            <span class="room-state" id="roomState" data-s="0">游戏未运行</span>
+            <h2 class="room-name" id="roomName">还没有加入房间</h2>
+            <p class="room-desc" id="roomDesc"></p>
+          </div>
+          <dl class="room-meta" id="roomMeta"></dl>
+          <ul class="members" id="members"></ul>
+          <p class="empty" id="membersEmpty">加入房间后，成员显示在这里。</p>
+          <details class="help"><summary>断开后怎么重连</summary>
+            <p>先在游戏里退出本地无线会话，再离开房间、重新加入。控制台不会强行改游戏里的会话状态。服务器房间和游戏里的房间是两层：先进服务器房间，再在游戏里建房或加入。</p>
+          </details>
+        </div>
+      </div>
+    </section>
+
+    <!-- ======================================================== 调试 -->
+    <section class="page" id="page-debug" hidden>
+      <header class="banner"><h1>调试</h1><p>日志、dump 和测试用的启动选项。</p></header>
+      <div class="dbg">
+        <div class="dbg-log">
+          <div class="toolbar">
+            <input type="search" id="logFilter" placeholder="过滤，例如 nvn_vk 或 yuzu-net" spellcheck="false" aria-label="过滤日志">
+            <label class="toggle small"><input type="checkbox" id="logFollow" checked><span>跟随</span></label>
+            <button class="btn small" id="logClear">清空显示</button>
+            <span class="grow"></span>
+            <label class="inline">联机日志
+              <select id="netLevel"><option value="0">关闭</option><option value="1">状态</option><option value="2" selected>调试</option><option value="3">收发详情</option></select>
+            </label>
+          </div>
+          <pre class="log" id="log" tabindex="0" aria-label="游戏日志"></pre>
+          <div class="toolbar">
+            <button class="btn small" id="dumpMini">写 minidump</button>
+            <button class="btn small" id="dumpFull">完整内存 dump</button>
+            <button class="btn small" id="openSession">打开会话文件夹</button>
+            <details class="help inline-help"><summary>什么时候写 dump</summary>
+              <p>游戏卡住（画面不动、没有反应）而卡死检测没有报告时，先写 minidump 再结束游戏。dump 和这次运行的日志放在同一个会话文件夹里，报告 zip 会带上它。完整内存 dump 有几个 GB。</p>
+            </details>
+          </div>
+        </div>
+
+        <div class="dbg-side">
+          <div class="subtabs small" role="tablist" aria-label="调试选项">
+            <button role="tab" data-dsub="run" aria-selected="true">下次启动</button>
+            <button role="tab" data-dsub="diag" aria-selected="false">诊断设置</button>
+          </div>
+
+          <form class="dsub" id="runOpts" autocomplete="off">
+            <p class="hint">只对从控制台启动的下一次运行生效，不保存。<span id="runOptsSummary"></span></p>
+            <div class="grid2">
+              <label class="field"><span class="lbl">速度倍数</span><input name="SSBU_SPEED" type="number" min="0" step="1" placeholder="1"></label>
+              <label class="field"><span class="lbl">运行秒数</span><input name="seconds" type="number" min="0" step="1" placeholder="0 = 直到关闭"></label>
+            </div>
+            <details class="help"><summary>速度倍数</summary>
+              <p>刷新时钟加快 n 倍，0 = 不限速。游戏逻辑不跳帧，但声音会错乱，配合“静音”使用。只用于测试。</p>
+            </details>
+            <div class="toggles">
+              <label class="toggle"><input type="checkbox" name="SSBU_SKIP_MOVIES"><span>跳过片头动画</span></label>
+              <label class="toggle"><input type="checkbox" name="SSBU_AUDIO_MUTE"><span>静音</span></label>
+              <label class="toggle"><input type="checkbox" name="SSBU_VK_VALIDATE"><span>Vulkan 校验层</span></label>
+            </div>
+            <label class="field"><span class="lbl">接口审计</span>
+              <select name="SSBU_STRICT"><option value="">关闭</option><option value="report">只报告</option><option value="1">遇到未实现就停止</option></select>
+            </label>
+            <details class="help"><summary>接口审计</summary>
+              <p>游戏调用系统接口时，检查它是真正实现的、提升的还是简化的。“遇到未实现就停止”会在游戏第一次调用未真正实现的接口时停下，日志里写明是哪个。</p>
+            </details>
+
+            <h3>指定对战</h3>
+            <div class="grid2">
+              <label class="field"><span class="lbl">1P 角色</span><input name="dm_p1" placeholder="mario" spellcheck="false"></label>
+              <label class="field"><span class="lbl">2P 角色</span><input name="dm_p2" placeholder="donkey" spellcheck="false"></label>
+            </div>
+            <div class="grid2">
+              <label class="field"><span class="lbl">舞台</span><input name="dm_stage" placeholder="battlefield" spellcheck="false"></label>
+              <label class="field"><span class="lbl">形态</span>
+                <select name="dm_form"><option value="">普通</option><option value="battlefield">战场</option><option value="omega">终点</option></select></label>
+            </div>
+            <div class="grid3">
+              <label class="field"><span class="lbl">2P</span><select name="dm_p2type"><option value="">CPU</option><option value="human">玩家</option></select></label>
+              <label class="field"><span class="lbl">CPU 等级</span><input name="dm_cpu" type="number" min="1" max="9" placeholder="9"></label>
+              <label class="field"><span class="lbl">残机</span><input name="dm_stock" type="number" min="1" max="99" placeholder="3"></label>
+            </div>
+            <label class="field"><span class="lbl">战斗多久后结束</span><input name="SSBU_DEBUG_END" placeholder="例如 40s 或 1200（帧）" spellcheck="false"></label>
+            <details class="help"><summary>指定对战怎么用</summary>
+              <p>填了角色或舞台后，游戏照常走菜单，但在确认对战时把设置替换成这里的。角色用内部名（mario、donkey、kirby、captain、ganon…），舞台用 ui_stage 名（battle_field、end、mario_castle64…，也接受 battlefield、fd）。需要用测试输入序列自动走菜单，或手动选一场对战。道具和场地机关项未验证，这里没有提供。</p>
+            </details>
+            <div class="actions"><button class="btn small" type="button" id="runOptsReset">全部清除</button></div>
+          </form>
+
+          <form class="dsub" id="launcherOpts" autocomplete="off" hidden>
+            <p class="hint">写进 launcher.ini，每次启动都生效。改动立即保存。</p>
+            <div class="grid2">
+              <label class="field"><span class="lbl">随机数种子</span><input name="fixed_seed" spellcheck="false"></label>
+              <label class="field"><span class="lbl">崩溃时写 dump</span>
+                <select name="minidump"><option value="1">是（几十 MB）</option><option value="0">否</option><option value="full">完整内存（数 GB）</option></select></label>
+            </div>
+            <details class="help"><summary>随机数种子</summary>
+              <p>auto = 每次随机选一个并记下来，回放时用同一个；none = 不固定；或者填一个数字。</p>
+            </details>
+            <div class="toggles">
+              <label class="toggle"><input type="checkbox" name="deterministic"><span>战斗确定性模式</span></label>
+              <label class="toggle"><input type="checkbox" name="fight_hash"><span>记录每帧状态散列</span></label>
+            </div>
+            <details class="help"><summary>这两项是什么</summary>
+              <p>确定性模式：战斗开始时固定脚本随机数，机器慢时不补逻辑帧，回放更容易一致；关闭后行为和正常游戏完全相同。状态散列：每个战斗帧记录角色状态，回放时能找出第一处不同的帧。</p>
+            </details>
+            <div class="grid2">
+              <label class="field"><span class="lbl">报告 zip</span>
+                <select name="zip"><option value="always">每次</option><option value="error">只在出错时</option><option value="never">不打包</option></select></label>
+              <label class="field"><span class="lbl">保留会话数</span><input name="keep_sessions" type="number" min="1" max="999"></label>
+            </div>
+            <div class="grid2">
+              <label class="field"><span class="lbl">排除的逻辑处理器</span><input name="exclude_cpus" placeholder="例如 8,9" spellcheck="false"></label>
+              <label class="field"><span class="lbl">冒烟测试秒数</span><input name="smoke_seconds" type="number" min="10" max="3600"></label>
+            </div>
+            <details class="help"><summary>排除逻辑处理器</summary>
+              <p>不让游戏在这些逻辑处理器上运行，用于排查个别核心不稳定导致的崩溃。编号从 0 开始，逗号分隔。</p>
+            </details>
+            <h3>额外的环境变量</h3>
+            <div id="envRows"></div>
+            <button type="button" class="btn small" id="envAdd">添加一行</button>
+            <details class="help"><summary>说明</summary>
+              <p>每次启动都传给游戏，例如 SSBU_RENDERER = gl。完整列表在 BUILDING.md 和运行时源码开头。“下次启动”里的选项与这里冲突时，以“下次启动”为准。</p>
+            </details>
+          </form>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<dialog id="dlgNote" class="dialog">
+  <form method="dialog">
+    <h2 id="noteTitle">运行出错了</h2>
+    <p id="noteBody"></p>
+    <label class="field"><span class="lbl">出错前在做什么（会写进报告）</span><textarea id="noteText" rows="3"></textarea></label>
+    <div class="actions">
+      <button class="btn primary" value="save" id="noteSave">写进报告</button>
+      <button class="btn" value="skip">跳过</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlgMap" class="dialog">
+  <form method="dialog">
+    <h2>逐键录入</h2>
+    <p id="mapIntro">按屏幕上提示的键。8 秒内不按会跳过这一项，保留原来的映射。</p>
+    <div class="map-ask" id="mapAsk" aria-live="assertive"></div>
+    <ol class="map-log" id="mapLog"></ol>
+    <div class="actions"><button class="btn" value="cancel">取消</button></div>
+  </form>
+</dialog>
+
+<div class="toast" id="toast" role="alert" hidden></div>
+<script src="app.js"></script>
+<script src="updates.js"></script>
+</body>
+</html>

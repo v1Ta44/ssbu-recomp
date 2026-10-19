@@ -15,6 +15,7 @@
 #include <string.h>
 #include <windows.h>
 #include "sdklift.h"
+#include "nvn_lifetime.h"
 
 void register_nnmii_imports(void);
 void register_nnapplet_imports(void);
@@ -417,7 +418,7 @@ static void os_AllocateMemoryBlock(Ctx *c) {
     if (p) wr64(c->x[0], P(p));
     c->x[0] = p ? 0 : 0x1003;
 }
-static void os_FreeMemoryBlock(Ctx *c) { VirtualFree((void *)(uintptr_t)c->x[0], 0, MEM_RELEASE); }
+static void os_FreeMemoryBlock(Ctx *c) { uint64_t life=nvn_lifetime_release_begin(c->x[0],0,NL_RELEASE,c->x[30]); int released=VirtualFree((void *)(uintptr_t)c->x[0],0,MEM_RELEASE)!=0; nvn_lifetime_release_end(life,released); }
 static void os_SetMemoryPermission(Ctx *c) {
     DWORD old, prot = (uint32_t)c->x[2] == 3 ? PAGE_READWRITE : (uint32_t)c->x[2] == 1 ? PAGE_READONLY : PAGE_NOACCESS;
     if ((uint32_t)c->x[2] != 0 && (uint32_t)c->x[2] != 1 && (uint32_t)c->x[2] != 3) guest_trap("nn::os::SetMemoryPermission: invalid permission", c->x[30] - 4);
@@ -428,7 +429,9 @@ static void os_SetMemoryPermission(Ctx *c) {
 static void os_SetMemoryAttribute(Ctx *c) { (void)c; }
 static void os_FreeAddressRegion2(Ctx *c) {      // PR #2 (review): report the release before and after, as os_FreeAddressRegion in nnsdk.c does
     uint64_t base = c->x[0];
-    cxxrt_mem_changed(base, 0); VirtualFree((void *)(uintptr_t)base, 0, MEM_RELEASE); cxxrt_mem_changed(base, 0);
+    uint64_t life=nvn_lifetime_release_begin(base,0,NL_RELEASE,c->x[30]);
+    cxxrt_mem_changed(base, 0); int released=VirtualFree((void *)(uintptr_t)base, 0, MEM_RELEASE)!=0; cxxrt_mem_changed(base, 0);
+    nvn_lifetime_release_end(life,released);
     c->x[0] = 0;
 }
 static void os_IsVammEnabled(Ctx *c) { c->x[0] = 1; }

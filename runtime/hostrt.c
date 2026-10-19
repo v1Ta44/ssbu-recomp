@@ -548,6 +548,7 @@ void module_coverage_report(FILE *out);      /* nnro.c: script module functions 
 void (*g_exit_report_hook)(FILE *);          /* a test's own last line (nnsdk2.c eh_main_test) */
 
 void report_and_exit(int code) {
+    { void ssbu_net_leave(void); ssbu_net_leave(); }
     if (g_exit_report_hook) g_exit_report_hook(stdout);
     audit_exit_counts();
     print_import_summary(stdout);

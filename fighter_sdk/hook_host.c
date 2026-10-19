@@ -368,6 +368,34 @@ typedef struct {
 static void hk_log(const char *s) { printf("%s\n", s); trace_printf("%s\n", s); }
 static const HookApi g_hook_api = {sizeof(HookApi), 1, hook_install, hook_install_name, hook_remove, hook_enable, hook_calls, hook_address, call_indirect, hk_log, hook_error};
 
+#ifndef SSBU_ENABLE_NET_DELAY
+#define SSBU_ENABLE_NET_DELAY 0
+#endif
+static HMODULE g_delay_mod;
+static void hook_load_delay(void) {
+#if SSBU_ENABLE_NET_DELAY
+    char path[MAX_PATH * 2];
+    DWORD length = GetModuleFileNameA(NULL, path, sizeof path);
+    if (!length || length >= sizeof path) return;
+    char *slash = strrchr(path, '\\');
+    if (!slash) return;
+    if (!getenv("SSBU_NET_DELAY_CONFIG")) {
+        char config[MAX_PATH * 2];
+        *slash = 0;
+        snprintf(config, sizeof config, "%s\\..\\config", path);
+        CreateDirectoryA(config, NULL);
+        snprintf(config, sizeof config, "%s\\..\\config\\online-delay.ini", path);
+        _putenv_s("SSBU_NET_DELAY_CONFIG", config);
+        *slash = '\\';
+    }
+    snprintf(slash + 1, sizeof path - (slash + 1 - path), "plugins\\latency_slider.dll");
+    HMODULE dll = LoadLibraryA(path);
+    void (*init)(const HookApi *) = dll ? (void (*)(const HookApi *))(void *)GetProcAddress(dll, "mod_init") : NULL;
+    if (!init) { printf("net-delay: enabled extension missing: %s\n", path); if (dll) FreeLibrary(dll); return; }
+    g_delay_mod = dll;
+    init(&g_hook_api);
+#endif
+}
 static void hook_load_mods(void) {
     char dir[MAX_PATH * 2], pat[MAX_PATH * 2];
     const char *env = getenv("SSBU_MODS");
@@ -381,6 +409,13 @@ static void hook_load_mods(void) {
         char path[MAX_PATH * 3];
         snprintf(path, sizeof path, "%s\\%s", dir, fd.cFileName);
         HMODULE dll = LoadLibraryA(path);
+        if (dll && dll == g_delay_mod) { FreeLibrary(dll); continue; }
+#if !SSBU_ENABLE_NET_DELAY
+        if (dll && GetProcAddress(dll, "ssbu_delay_state")) {
+            printf("net-delay: disabled at build time; ignoring %s\n", path);
+            FreeLibrary(dll); continue;
+        }
+#endif
         void (*init)(const HookApi *) = dll ? (void (*)(const HookApi *))(void *)GetProcAddress(dll, "mod_init") : NULL;
         if (!init) { printf("mod: %s is not a mod (no mod_init)\n", path); if (dll) FreeLibrary(dll); continue; }
         int before = g_hk_layers;
@@ -616,5 +651,6 @@ static void hook_start(Ctx *c) {                       /* once, before the game 
     hook_count_start();
     hook_health_start();
     fighter_debug_start();
+    hook_load_delay();
     hook_load_mods();
 }

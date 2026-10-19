@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; font-src 'self'; script-src 'self'; connect-src 'none'; img-src 'self' data:; frame-src 'none'; object-src 'none'; base-uri 'none'">
+<title>SSBU · 联机减延迟</title>
+<link rel="stylesheet" href="console/style.css"><link rel="stylesheet" href="panel.css">
+<script src="panel.js" defer></script>
+</head>
+<body data-expanded="false">
+<div id="full" hidden>
+  <div class="wipe" aria-hidden="true"></div>
+  <div class="page enter">
+    <header class="banner"><div class="topline"><span class="eyebrow">SSBU CONSOLE / ONLINE</span><button class="btn small" id="close" aria-label="收起设置">收起 <kbd>F8</kbd></button></div><h1>联机减延迟</h1><p>调整本机的联机等待帧数。</p></header>
+    <div id="connection" class="plate delay-connection" data-s="waiting" role="status"><i aria-hidden="true"></i><span class="txt" id="stateTitle">正在连接控制服务</span><span class="sub" id="stateDetail">准备好后显示当前设置。</span></div>
+    <section aria-label="等待模式">
+      <div class="chips delay-modes"><label><input id="auto" type="radio" name="mode" value="auto" checked><span>自动<small>交给游戏决定</small></span></label><label><input id="manual" type="radio" name="mode" value="manual"><span>手动<small>自己选择帧数</small></span></label></div>
+      <div class="delay-stepper"><button class="btn" id="minus" aria-label="减少一帧">−</button><div class="reading"><strong id="selected">AUTO</strong><span id="unit">自动等待</span></div><button class="btn" id="plus" aria-label="增加一帧">＋</button></div>
+      <label class="field range-field"><span class="lbl">手动帧数 <span>0 — 25 帧</span></span><input id="frames" type="range" min="0" max="25" step="1" value="3" aria-label="手动等待帧数"></label>
+      <div class="result-grid"><div><span class="lbl">上次游戏给出的值</span><b id="original">—</b></div><div><span class="lbl">上次实际应用</span><b id="effective">—</b></div></div>
+    </section>
+    <footer><p class="hint" id="saveStatus">设置只影响本机。</p><details class="help"><summary>怎样选择更合适？</summary><p>先用自动模式打一局。手动时从游戏给出的值开始，每次降低一帧；出现等待或卡顿就调高。</p><p>选择会在游戏下次计算时应用。切回自动会停止覆盖；需要干净的对照时，重新进入本地无线会话。</p></details><div class="actions"><button class="btn primary" id="reset">恢复自动</button><span class="hint">Esc 收起 · 设置自动保存</span></div></footer>
+  </div>
+</div>
+</body>
+</html>

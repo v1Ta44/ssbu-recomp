@@ -47,6 +47,7 @@
 #include "mx_translate.h"
 #include "gfx_options.h"
 #include "nvn_front.h"
+#include "nvn_lifetime.h"
 #include "tex_decode.h"
 #include "nvn_sdk.h"
 #include "nvn_c4.h"
@@ -670,22 +671,27 @@ static void tex_put(Tex *t, const Fmt *f, int level, int layer, int x, int y, in
     }
 }
 
-/* PR #41: this renderer consumes packaged texels once, at the deferred first upload. Capture its source before publishing
- * the texture so that later hashing and upload do not depend on the caller keeping the original storage mapped. */
+/* Packaged texels belong to the initializer's caller, not to the deferred renderer.
+ * Capture them before publishing the texture; resource loading may free/decommit
+ * that buffer before the loading-screen prewarmer or the first draw reads it. */
 static int tex_capture_packaged(Tex *t) {
     if (!t->b.packaged || !t->data_size) return 1;
     t->packaged_copy = malloc(t->data_size);
     if (!t->packaged_copy) return 0;
     SIZE_T got = 0;
+    uint64_t life = NVN_LIFE(NL_READ_BEGIN,t,t->guest,t->b.pool,t->b.packaged,t->data_size,NL_CAPTURE,0);
     if (!ReadProcessMemory(GetCurrentProcess(), P(t->b.packaged), t->packaged_copy, t->data_size, &got) || got != t->data_size) {
+        (void)NVN_LIFE(NL_READ_END,t,t->guest,t->b.pool,0,0,life,0);
         free(t->packaged_copy); t->packaged_copy = NULL; return 0;
     }
+    (void)NVN_LIFE(NL_READ_END,t,t->guest,t->b.pool,0,0,life,0);
     return 1;
 }
 static const uint8_t *tex_source(const Tex *t) {
     return t->packaged_copy ? t->packaged_copy : t->b.packaged ? (const uint8_t *)P(t->b.packaged) : t->mem;
 }
 static void tex_release_packaged(Tex *t) {
+    if (t->packaged_copy) (void)NVN_LIFE(NL_SNAPSHOT_RELEASE,t,t->guest,t->b.pool,t->packaged_copy,t->data_size,0,0);
     free(t->packaged_copy); t->packaged_copy = NULL;
 }
 
@@ -774,7 +780,9 @@ static void tex_upload_memory(Tex *t, const Fmt *f) {
                 return;
             }
             if (need > tmp_cap) { tmp_cap = need * 2; tmp = realloc(tmp, tmp_cap); }
+            uint64_t life = NVN_LIFE(NL_READ_BEGIN,t,t->guest,t->b.pool,p,L.lvl_size[l],b->packaged ? NL_OWNED : NL_BORROWED,0);
             tex_deswizzle_level(&L, l, p, tmp);
+            (void)NVN_LIFE(NL_READ_END,t,t->guest,t->b.pool,0,0,life,0);
             if (tf && tf->sw_decode) {
                 tex_decode_rgba8(b->format, tmp, L.lvl_w[l], L.lvl_h[l], tmp + lin);
                 tex_put(t, &sw, l, layer, 0, 0, 0, L.lvl_w[l], L.lvl_h[l], 1, tmp + lin);
@@ -803,7 +811,9 @@ static void tex_sync(Tex *t) {
         t->ww_seen = newest;
         g_ww_dirty++;
     } else g_ww_unwatched++;
+    uint64_t life = NVN_LIFE(NL_READ_BEGIN,t,t->guest,t->b.pool,src,t->data_size,t->b.packaged ? NL_OWNED : NL_BORROWED,0);
     uint64_t h = mem_hash(src, t->data_size, newest != 0 || (t->b.flags & 0x10) != 0);
+    (void)NVN_LIFE(NL_READ_END,t,t->guest,t->b.pool,0,0,life,0);
     int same = t->uploaded && !t->dirty && h == t->hash && (!newest || t->ww_hashed);
     t->ww_hashed = newest != 0;                    /* t->hash is the hash of every word (needed to compare the next time) */
     pf_add(PF_TEXHASH, pf0); g_pf_hash_bytes += (LONG64)t->data_size;
@@ -4217,11 +4227,14 @@ static void tex_initialize(Ctx *c) {                   /* (texture, builder) */
     memcpy(&t->b, P(A1), sizeof t->b);
     if (t->b.pool && nvn_pool_range(t->b.pool, &mem, &size) && mem) { t->mem = (uint8_t *)P(mem) + t->b.offset; t->limit = (uint8_t *)P(mem) + size; }
     t->storage = tex_storage_size2(&t->b, &t->data_size);
+    (void)NVN_LIFE(NL_TEXTURE_INIT,t,A0,t->b.pool,t->mem,t->data_size,t->b.format,c->x[30]);
+    if (t->b.packaged) (void)NVN_LIFE(NL_PACKAGED_SOURCE,t,A0,t->b.pool,t->b.packaged,t->data_size,0,c->x[30]);
     if (!tex_capture_packaged(t)) {                /* PR #41, changed: no copy = the old behaviour (the game's own storage is read) */
         static int said;
         if (said++ < 5) printf("nvn: packaged texture %dx%d format 0x%x: its source %llx + %llu could not be copied: read in place as before\n",
                                t->b.width, t->b.height, t->b.format, (unsigned long long)t->b.packaged, (unsigned long long)t->data_size);
     }
+    if (t->packaged_copy) (void)NVN_LIFE(NL_SNAPSHOT_READY,t,A0,t->b.pool,t->packaged_copy,t->data_size,0,c->x[30]);
     t->guest = A0;
     tex_range_add(t);
     do { t->all_next = g_all_tex; } while (InterlockedCompareExchangePointer((void *volatile *)&g_all_tex, t, t->all_next) != t->all_next);
@@ -4231,6 +4244,7 @@ static void tex_finalize(Ctx *c) {
     gl_barrier();
     Tex *t = hobj(A0, K_TEX);
     if (!t) return;
+    (void)NVN_LIFE(NL_TEXTURE_FINAL,t,A0,t->b.pool,t->mem,t->data_size,0,c->x[30]);
     if (!t->dead) tex_range_remove(t);
     InterlockedExchange(&t->dead, 1);
     wr32(A0 + 8, 0);
@@ -5435,7 +5449,9 @@ int nvn_front_tex_changed(Tex *t) {
         t->ww_seen = newest;
         g_ww_dirty++;
     } else g_ww_unwatched++;
+    uint64_t life = NVN_LIFE(NL_READ_BEGIN,t,t->guest,t->b.pool,src,t->data_size,t->b.packaged ? NL_OWNED : NL_BORROWED,0);
     uint64_t h = mem_hash(src, t->data_size, newest != 0 || (t->b.flags & 0x10) != 0);
+    (void)NVN_LIFE(NL_READ_END,t,t->guest,t->b.pool,0,0,life,0);
     int same = t->uploaded && !t->dirty && h == t->hash && (!newest || t->ww_hashed);
     t->ww_hashed = newest != 0;
     pf_add(PF_TEXHASH, pf0); g_pf_hash_bytes += (LONG64)t->data_size;
@@ -5469,7 +5485,9 @@ int nvn_front_tex_read(Tex *t, int decode, nvn_front_put_fn *put) {
             size_t lin = L.lvl_linear_size[l], need = lin + (decode ? (size_t)L.lvl_w[l] * L.lvl_h[l] * 4 : 0);
             if (!b->packaged && t->limit && p + L.lvl_size[l] > t->limit) return 0;
             if (need > tmp_cap) { tmp_cap = need * 2; tmp = realloc(tmp, tmp_cap); }
+            uint64_t life = NVN_LIFE(NL_READ_BEGIN,t,t->guest,t->b.pool,p,L.lvl_size[l],b->packaged ? NL_OWNED : NL_BORROWED,0);
             tex_deswizzle_level(&L, l, p, tmp);
+            (void)NVN_LIFE(NL_READ_END,t,t->guest,t->b.pool,0,0,life,0);
             if (decode) {
                 tex_decode_rgba8(b->format, tmp, L.lvl_w[l], L.lvl_h[l], tmp + lin);
                 put(t, l, layer, L.lvl_w[l], L.lvl_h[l], 1, tmp + lin, (size_t)L.lvl_w[l] * L.lvl_h[l] * 4, 1, 0);

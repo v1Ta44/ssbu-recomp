@@ -16,13 +16,41 @@ import os
 import shutil
 import subprocess
 import sys
+try:
+    from .player_name import game_name
+except ImportError:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from player_name import game_name
 import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def exclude_cpus(cpus):
+    """Take logical processors out of this process's affinity; the game started from here inherits it (Windows only)."""
+    import ctypes
+    from ctypes import wintypes
+    k32 = ctypes.WinDLL('kernel32', use_last_error=True)
+    k32.GetCurrentProcess.restype = wintypes.HANDLE
+    k32.GetProcessAffinityMask.argtypes = [wintypes.HANDLE, ctypes.POINTER(ctypes.c_size_t), ctypes.POINTER(ctypes.c_size_t)]
+    k32.SetProcessAffinityMask.argtypes = [wintypes.HANDLE, ctypes.c_size_t]
+    proc, system = ctypes.c_size_t(), ctypes.c_size_t()
+    me = k32.GetCurrentProcess()
+    if not k32.GetProcessAffinityMask(me, ctypes.byref(proc), ctypes.byref(system)):
+        sys.exit('GetProcessAffinityMask failed: %d' % ctypes.get_last_error())
+    mask = proc.value
+    for n in cpus:
+        mask &= ~(1 << n)
+    if not mask:
+        sys.exit('--exclude-cpus leaves no processor to run on')
+    if not k32.SetProcessAffinityMask(me, mask):
+        sys.exit('SetProcessAffinityMask failed: %d' % ctypes.get_last_error())
+    print('affinity: logical processors %s left out (mask %x)' % (','.join(map(str, cpus)), mask))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('--nickname', help='Game identity; defaults to the name saved on the Console Start page')
     ap.add_argument('--userdata', required=True)
     ap.add_argument('--build', default=os.path.join(REPO, 'build'))
     ap.add_argument('--seconds', type=int, default=0, help='stop after this many seconds (0 = play until you quit)')
@@ -32,7 +60,16 @@ def main():
     ap.add_argument('--seed', help='SSBU_FIXED_SEED value (deterministic random numbers)')
     ap.add_argument('--log', help='write the game output to this file instead of the console')
     ap.add_argument('--env', action='append', default=[], help='NAME=VALUE, may be repeated')
+    ap.add_argument('--exclude-cpus', help='comma list of logical processors the game must not run on (e.g. 8,9 for a core '
+                                           'that reports machine-check errors); the game inherits the affinity of this script')
     a = ap.parse_args()
+    identity_override = next((v.partition('=')[2] for v in reversed(a.env) if v.partition('=')[0].upper() == 'SSBU_NICKNAME'), None)
+    try:
+        player = game_name(a.build, a.nickname if a.nickname is not None else identity_override)
+    except ValueError as error:
+        ap.error(str(error))
+    if a.exclude_cpus:
+        exclude_cpus([int(x) for x in a.exclude_cpus.split(',') if x.strip()])
     state_file = os.path.join(a.build, 'state.json')
     with open(state_file) as f:
         state = json.load(f)
@@ -64,6 +101,8 @@ def main():
     for kv in a.env:
         k, _, v = kv.partition('=')
         env[k] = v
+    env = {k: v for k, v in env.items() if k.upper() != 'SSBU_NICKNAME'}
+    env['SSBU_NICKNAME'] = player
     os.makedirs(a.userdata, exist_ok=True)
     os.makedirs(os.path.join(a.build, 'cache'), exist_ok=True)      # the runtime creates ..\cache\vk below it but not the folder itself (found 2026-10-13: with SSBU_VK_PREP=0 on a clean build nothing was saved)
     cmd = [exe, os.path.join(a.build, 'binaries', state.get('game_version', '13.0.4'), 'main.elf'), str(a.seconds)]

@@ -170,6 +170,10 @@ Options are environment variables, set with `--env NAME=VALUE` (full list: comme
 functions that are not the real behaviour), `SSBU_TRACE`, `SSBU_PAD_BACKEND=xinput`, `SSBU_FIXED_SEED=<n>`.
 Pad mapping file and tools: `ssbu_native.exe --pad-test`, `--pad-map <n>`.
 
+To run the build on other PCs: `python scripts/package.py` makes a folder that starts without Python or the build tools,
+with a launcher that writes a log folder and a report zip (system, log, input recording, save, minidump) for every run, and
+replays a report on this PC: [docs/PACKAGING.md](docs/PACKAGING.md).
+
 ## Troubleshooting
 
 - `"build_glslang.bat" is not recognised` / `vswhere.exe is not recognised`: Visual Studio Build Tools are missing or
@@ -192,3 +196,80 @@ Pad mapping file and tools: `ssbu_native.exe --pad-test`, `--pad-map <n>`.
 - A compiler job that fails after a power loss or while the PC is under load: run the same command again; only what
   changed is rebuilt. Closing a running game first matters: a running exe holds its DLLs open and the link fails.
 - Output with non-ASCII characters from Windows tools is shown with `?`; the logs in `build/logs` are the originals.
+
+
+## Native resource package backend
+
+Resource-package support is **off by default**. Standard builds and packages do not need or ship the Rust resource backend. This switch does not disable the separate PC Hook DLL / fighter SDK interfaces.
+
+```powershell
+# Enable resource packages (Rust/Cargo for x64 Windows required; verified with Rust 1.91):
+python scripts/setup.py --only link --with-mods
+# Return to the standard build, without compiling or loading the resource backend:
+python scripts/setup.py --only link --without-mods
+```
+
+Use the same flag with the full initial `--dump` command. Changing the flag causes a resumed setup to relink; it does not regenerate game sources. The low-level command is `python build.py link --with-mods` in `build/work`; its default is also off. Switching the feature invalidates the host objects so they cannot retain a previous setting.
+
+Enabled builds produce `ssbu_mod_backend.dll`, its build fingerprint and dependency notices beside the host. Dependencies are locked in `tools/mod_backend/Cargo.lock`; the packaged game needs neither Rust nor Python. `python scripts/build_mod_backend.py` builds only that DLL and does not change whether the host enables it.
+
+`ssbu_native.build.json` records the actual host executable hash and feature setting. `scripts/package.py` verifies this record and automatically includes or omits the backend. Do not delete or edit it; relink an older build to generate it. Installed packages use `<package>/mods/<mod-name>/` (beside `game/`), as explained in [PACKAGING.md](docs/PACKAGING.md).
+
+Resource packages, the C/JSON interface, focused tests and the read-only game-file boundary are documented in [docs/MOD_RESOURCES.md](docs/MOD_RESOURCES.md). A staged `build.py link --host-only` reuses the existing game library and links only the host runtime.
+
+
+## Optional extensions on yuzu
+
+These extensions belong to the personal `yuzu` branch. `main` mirrors the upstream original; do not merge
+`yuzu` or its feature branches into `main` unless the user explicitly changes this repository policy.
+
+Resource packages and online delay controls are independent build options. Both default to **off**.
+Use the same options when resuming a build; changing either option relinks the host and invalidates its previous check.
+
+| Build | Options for `scripts/setup.py` |
+|---|---|
+| Both disabled (default) | `--without-mods --without-latency-slider` |
+| Resource packages only | `--with-mods --without-latency-slider` |
+| Online delay slider only | `--without-mods --with-latency-slider` |
+| Both enabled | `--with-mods --with-latency-slider` |
+
+For an existing build, for example:
+
+```powershell
+python scripts/setup.py --only link --with-mods --with-latency-slider
+python scripts/setup.py --only link --without-mods --without-latency-slider
+```
+
+The same switches work on a fresh `scripts/setup.py --dump ...` build. Enabling resource packages requires
+Rust/Cargo. Enabling the delay slider requires MSVC Build Tools and the pinned WebView2 SDK; only that enabled
+build downloads/checks the SDK and compiles the extension. Both disabled needs neither extension's dependencies.
+The project's existing MSVC requirement for the renderer still applies.
+
+The delay plugin is built to `build/work/plugins/latency_slider.dll`; its Console overlay, assets and licenses
+are in `build/work/net_delay/`. The enabled host loads its own plugin relative to the executable, including when
+started directly or through Console. The setting defaults to `build/config/online-delay.ini` (or the package's
+`config/online-delay.ini`); `SSBU_NET_DELAY_CONFIG` overrides it. The initial selection is Auto. The original
+13.0.4 fingerprint and live LDN peer checks remain in effect. `SSBU_NET_DELAY_UI=off` hides only the overlay.
+
+A host built with `--without-latency-slider` omits automatic loading and refuses the delay plugin in `SSBU_MODS`,
+even if an older DLL remains in that directory. Resource package support is likewise disabled by the host's
+compile option. General fighter SDK plugins remain independent of these two extensions.
+
+`*.build.json` records the two options and the exact executable hash. `scripts/package.py` reads this record,
+includes enabled extension artifacts and licenses, and leaves disabled extension leftovers out of the package.
+To link a staged host manually, `build.py link` accepts the same two pairs of switches; build enabled extension
+artifacts with the setup link step first. The default manual link disables both features.
+
+
+## Portable Console updates (personal yuzu build)
+
+Build the trusted update/recovery helper before Console; Console embeds that exact helper:
+
+```powershell
+$env:CARGO_TARGET_DIR = "$PWD/build/updater-target"
+cargo build --manifest-path tools/updater/Cargo.toml --release --no-default-features --locked
+$env:CARGO_TARGET_DIR = "$PWD/build/console-target"
+cargo build --manifest-path tools/console/Cargo.toml --release --locked
+```
+
+`python scripts/package.py --public --zip` excludes data.arc, shader caches, personal/smoke saves and local config, and removes local manifest paths. It retains the normal current-build checks. The update protocol and release command are documented in `docs/PORTABLE_UPDATER_2026-10-19.md`; `scripts/release_update.py --help` builds signed full/file updates from verified portable directories. Keys are never bundled, and generating release artifacts does not upload or publish them.

@@ -13,6 +13,7 @@
  *     clamp and the sample mask are dynamic state, so the key is (stages, topology class, pass formats, samples, logic op,
  *     sample shading): few keys per pair, which is what makes the prediction possible.
  * One lock (g_sh_lock) guards the stage table, the pipeline table, the signature / pair tables and the job queue. */
+#include <psapi.h>                                 /* K32GetProcessMemoryInfo (stagelib_evict, prep_line) */
 typedef struct { uint8_t unit, dim, shadow; uint16_t binding; } VSmp;
 typedef struct VStage {
     uint64_t h, hb;                                /* h: this variant (code, constants, canonical key, forced outputs); hb: code and constants only */
@@ -23,6 +24,9 @@ typedef struct VStage {
     VSmp smp[64];
     VkShaderModule mod; struct VStage *next, *next_h;
     VkPipeline lib, lib2; volatile LONG lib_state, lib2_state;      /* session 9 (SSBU_VK_GPL=2): the stage's pipeline library; lib2: a vertex stage with the empty fragment shader state */
+    uint64_t spv;                                  /* memory round: the SPIR-V file of mod (..\cache\vk\spv\<spv>.spv); 0 = none known */
+    int mod_users, lib_users, lib_linked;          /* g_sh_lock: pipeline creations using mod / linking from lib or lib2 right now / ever linked from */
+    volatile LONG64 lib_used;                      /* frame of the last link from (or creation of) lib or lib2: the eviction's age */
 } VStage;
 #define MX_VK_VERSION 6u                        /* part of every hash: change it when mx_translate's Vulkan text or these records change */
 typedef struct { uint32_t magic; int32_t stage, code_len; uint32_t key[4], fo; uint64_t spv, hb; uint32_t cbufs, ssbos, ssbo_w, images, dep, tex_units, in_attr, out_attr; int32_t uses_alpha, nsmp; VSmp smp[64]; } StageRec;
@@ -66,8 +70,17 @@ static volatile LONG g_in_fight;
  * "in a fight" for the purpose of NOT holding a caller = a fight frame within the last 600 frames. */
 static volatile LONG64 g_fight_last = -100000;
 static int fight_recent(void) { return g_in_fight || nvn_front_frame_next() - g_fight_last < 600; }
+/* 2026-10-16: frames in a row without a compute dispatch (no fighter on screen: menus, loading screens), counted by the
+ * render thread (nvn_vk_draw.c), and the barrier holding a loading screen. Either opens, inside the 600 frames of
+ * fight_recent, the work that otherwise waits for "no fight" (the preparation, the announced containers): in run
+ * 20261016-090403 the menu after the first fight (frames ~1500-1800) fell inside those 600 frames and the preparation stood
+ * at 132 of 521 containers from frame 1388 to the exit. 120 frames: a fight frame without a dispatch comes alone (run s7fn2,
+ * frame 2072), not two seconds in a row. */
+static volatile LONG g_light_run, g_bar_wait;
+static int fight_far(void) { return g_light_run >= 120 || !fight_recent(); }      /* the preparation's test */
+static int bg_open(void) { return g_bar_wait || fight_far(); }      /* the announced containers' test: also while the barrier holds a loading screen */
 static LONG64 g_var_known;
-static LONG64 g_jq_queued, g_jq_done, g_bq_queued, g_bq_done;
+static LONG64 g_jq_queued, g_jq_done, g_bq_queued, g_bq_done, g_aq_queued, g_aq_done;
 /* SSBU_VK_HOLDLOG=1 only: when and by whom a stage's code was first handed to the workers (0 = nvnProgramSetShaders,
  * 1 = the container scan's background queue), so that a hold can say whether anyone knew the code before its draw. */
 static struct { uint64_t hb; int32_t frame; int32_t origin; } g_ho[65536];
@@ -175,7 +188,7 @@ static void vstage_from_rec(VStage *v, const StageRec *r, uint64_t vh, VkShaderM
     v->h = vh; v->hb = r->hb; v->code_len = r->code_len; memcpy(v->key, r->key, 16); v->fo = r->fo;
     v->cbufs = r->cbufs; v->ssbos = r->ssbos; v->ssbo_w = r->ssbo_w; v->images = r->images; v->dep = r->dep; v->tex_units = r->tex_units; v->in_attr = r->in_attr; v->out_attr = r->out_attr;
     v->uses_alpha = r->uses_alpha; v->nsmp = r->nsmp; memcpy(v->smp, r->smp, sizeof v->smp);
-    v->mod = mod; v->ok = 1;
+    v->mod = mod; v->ok = 1; v->spv = r->spv;
 }
 static int key_fits(int s, const uint32_t *want, const uint32_t *have, uint32_t dep, uint32_t tex) {
     uint32_t da = s == 0 ? dep : 0;
@@ -234,6 +247,7 @@ static void vstage_build(VStage *v, const SSrc *src) {
             uint64_t spv_hash = 0;
             if (in.screen_scale) { InterlockedIncrement64(&g_rs_stages); if (strstr(out.glsl, "mx_fcs)")) InterlockedIncrement64(&g_rs_fcs); if (strstr(out.glsl, "mx_tf(")) InterlockedIncrement64(&g_rs_tf); }
             v->mod = module_from_glsl(s, out.glsl, what, &spv_hash);
+            v->spv = spv_hash;
             v->cbufs = out.cbufs; v->ssbos = out.ssbos; v->ssbo_w = out.ssbo_written; v->images = out.images; v->in_attr = out.in_attr; v->out_attr = out.out_attr;
             v->dep = s == 0 ? out.int_dep : 0; v->tex_units = out.tex_units; v->uses_alpha = out.uses_alpha; v->nsmp = out.nsmp;
             for (int i = 0; i < out.nsmp && i < 64; i++) {
@@ -329,7 +343,7 @@ static VStage *vstage_get(Prog *p, int s, const uint32_t *key, uint32_t fo) {
                    s == 5 ? "compute" : s ? "fragment" : "vertex", how == 1 ? "made at the draw" : "waited for (a worker was making it)", (double)dt * 1000.0 / (double)fq.QuadPart, p->serial, (unsigned long long)v->hb,
                    key[0], key[1], key[2], key[3], v->key[0], v->key[1], v->key[2], v->key[3], fo, v->from_rec ? "from its record on disk" : "translated now (no record)");
             EnterCriticalSection(&g_sh_lock);
-            printf("nvn_vk_hold:     %s; jobs waiting now: %lld foreground, %lld background (container scan)\n", ho_text(v->hb), (long long)(g_jq_queued - g_jq_done), (long long)(g_bq_queued - g_bq_done));
+            printf("nvn_vk_hold:     %s; jobs waiting now: %lld foreground, %lld background (container scan), %lld announced containers\n", ho_text(v->hb), (long long)(g_jq_queued - g_jq_done), (long long)(g_bq_queued - g_bq_done), (long long)(g_aq_queued - g_aq_done));
             LeaveCriticalSection(&g_sh_lock); } }
     st->vk = v; memcpy(v->local, st->local, sizeof v->local);
     return v->ok ? v : NULL;
@@ -427,6 +441,42 @@ static void gpl_ms(VkPipelineMultisampleStateCreateInfo *ms, VkSampleMask *smask
     ms->rasterizationSamples = (VkSampleCountFlagBits)(samples ? samples : 1); ms->pSampleMask = smask;
     if (sshade == 1 && D.f2.features.sampleRateShading) { ms->sampleShadingEnable = VK_TRUE; ms->minSampleShading = 1.0f; }
 }
+/* Memory round (2026-10-15). A stage's shader module is needed only to create pipelines from it; with a library per stage
+ * that is its library (and, for a vertex stage drawn alone, the second one). The driver keeps a copy of the SPIR-V in every
+ * module (the files average 91 KB; run mario6: 16,266 modules alive at the end, 9.2 GB private memory with the libraries).
+ * So once its library is made the module goes (SSBU_VK_MOD_KEEP=1: kept, as before), and a later creation that needs it
+ * reads the SPIR-V file again into a module of its own that it destroys at once. A module given to a creation call can be
+ * destroyed after the call (it is consumed at creation); mod_users keeps one from going while a call is using it. */
+static LONG64 g_mod_dropped, g_mod_reread;
+static int mod_keep(void) { static int on = -1; if (on < 0) on = getenv("SSBU_VK_MOD_KEEP") && atoi(getenv("SSBU_VK_MOD_KEEP")); return on; }
+static VkShaderModule stage_mod_get(VStage *v, int *temp) {      /* any thread, g_sh_lock NOT held */
+    VkShaderModule m;
+    EnterCriticalSection(&g_sh_lock);
+    m = v->mod;
+    if (m) v->mod_users++;
+    LeaveCriticalSection(&g_sh_lock);
+    *temp = !m;
+    if (!m && v->spv && (m = module_from_spv(v->spv)) != NULL) InterlockedIncrement64(&g_mod_reread);
+    if (!m) vkd_fail("the shader module of stage %u is gone and its SPIR-V file %016llx cannot be read", v->id, (unsigned long long)v->spv);
+    return m;
+}
+static void stage_mod_put(VStage *v, VkShaderModule m, int temp) {
+    if (temp) { vkDestroyShaderModule(V.device, m, NULL); return; }
+    EnterCriticalSection(&g_sh_lock);
+    v->mod_users--;
+    LeaveCriticalSection(&g_sh_lock);
+}
+static void stage_mod_drop(VStage *v) {            /* after its library was made: only a vertex or fragment stage whose SPIR-V file is there */
+    char path[160];
+    VkShaderModule m = NULL;
+    if (mod_keep() || g_offline || v->temp || v->stage > 1 || !v->spv || !v->mod) return;
+    snprintf(path, sizeof path, "%s/spv/%016llx.spv", vkc_dir(), (unsigned long long)v->spv);
+    if (GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES) return;
+    EnterCriticalSection(&g_sh_lock);
+    if (!v->mod_users) { m = v->mod; v->mod = NULL; }
+    LeaveCriticalSection(&g_sh_lock);
+    if (m) { vkDestroyShaderModule(V.device, m, NULL); InterlockedIncrement64(&g_mod_dropped); }
+}
 /* Any thread, no lock held: the pair library; *how: 0 it was there, 1 compiled by this call, 2 waited for the thread compiling it. */
 static PairLib *pairlib_ensure(VStage *vs, VStage *fs, int samples, int sshade, int *how) {
     unsigned h = (vs->id * 2654435761u ^ (fs ? fs->id * 40503u : 0) ^ (unsigned)(samples * 131 + sshade)) & 1023;
@@ -457,8 +507,10 @@ static PairLib *pairlib_ensure(VStage *vs, VStage *fs, int samples, int sshade, 
     VkPipelineShaderStageCreateInfo st[2];
     memset(st, 0, sizeof st);
     st[0].sType = st[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    st[0].stage = VK_SHADER_STAGE_VERTEX_BIT; st[0].module = vs->mod; st[0].pName = "main";
-    st[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT; st[1].module = fs ? fs->mod : NULL; st[1].pName = "main";
+    int vtmp = 0, ftmp = 0;
+    VkShaderModule vmod = stage_mod_get(vs, &vtmp), fmod = fs ? stage_mod_get(fs, &ftmp) : NULL;
+    st[0].stage = VK_SHADER_STAGE_VERTEX_BIT; st[0].module = vmod; st[0].pName = "main";
+    st[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT; st[1].module = fmod; st[1].pName = "main";
     VkPipelineViewportStateCreateInfo vp = {VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
     vp.viewportCount = 1; vp.scissorCount = 1;
     VkPipelineRasterizationProvokingVertexStateCreateInfoEXT pv = {VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_PROVOKING_VERTEX_STATE_CREATE_INFO_EXT};
@@ -480,6 +532,7 @@ static PairLib *pairlib_ensure(VStage *vs, VStage *fs, int samples, int sshade, 
     gi.pNext = &gl; gi.flags = VK_PIPELINE_CREATE_LIBRARY_BIT_KHR | VK_PIPELINE_CREATE_RETAIN_LINK_TIME_OPTIMIZATION_INFO_BIT_EXT; gi.stageCount = fs ? 2 : 1; gi.pStages = st; gi.pViewportState = &vp; gi.pRasterizationState = &rs; gi.pMultisampleState = &ms;
     gi.pDepthStencilState = &ds; gi.pDynamicState = &dy; gi.layout = l->layout;
     VkResult r = pw_graphics(g_pcache, &gi, &l->lib);
+    stage_mod_put(vs, vmod, vtmp); if (fs) stage_mod_put(fs, fmod, ftmp);
     if (r != VK_SUCCESS) vkd_fail("vkCreateGraphicsPipelines, pair library (vertex stage %u, fragment stage %u): %s", vs->id, fs ? fs->id : 0, vk_result_name(r));
     LONG64 dt = tk() - t0;
     EnterCriticalSection(&g_sh_lock);
@@ -584,23 +637,30 @@ static void gpl_universal(void) {
 }
 static int gpl_opt_on(void);
 static int stage_fits_universal(const VStage *v) { for (int i = 0; i < v->nsmp; i++) { unsigned b = v->smp[i].binding; if (b >= 240) b -= 240; if (b >= 80 || b % 40u >= 32) return 0; } return 1; }      /* texture units 0..31 only */
-/* Any thread, no lock held: the library of one stage (alone: a vertex stage that is drawn without a fragment stage). */
-static VkPipeline stagelib_ensure(VStage *v, int alone, int *how) {
+/* Any thread, no lock held: the library of one stage (alone: a vertex stage that is drawn without a fragment stage).
+ * hold: the caller links from it and calls stagelib_release(v) after the link; until then it is not evicted. */
+static VkPipeline stagelib_get(VStage *v, int alone, int *how, int hold) {
     VkPipeline *lib = alone ? &v->lib2 : &v->lib;
     volatile LONG *state = alone ? &v->lib2_state : &v->lib_state;
     int mine = 0;
     LONG64 t0 = tk();
+    VkPipeline got;
     *how = 0;
     gpl_universal();
     EnterCriticalSection(&g_sh_lock);
-    if (*state == 0) { *state = 1; mine = 1; }
-    else if (*state == 1) { *how = 2; workers_boost(); while (*state < 2) WD_SLEEP(&g_sh_cv, &g_sh_lock, INFINITE); }
+    for (;;) {                                     /* state 0 again after a wait: evicted (stagelib_evict) before this thread woke */
+        if (*state == 0) { *state = 1; mine = 1; break; }
+        if (*state == 2) break;
+        *how = 2; workers_boost(); WD_SLEEP(&g_sh_cv, &g_sh_lock, INFINITE);
+    }
+    if (!mine) { got = *lib; if (hold) { v->lib_users++; v->lib_linked = 1; } v->lib_used = nvn_front_frame_next(); }
     LeaveCriticalSection(&g_sh_lock);
-    if (!mine) { if (*how == 2) { InterlockedIncrement64(&g_gpl_wait); InterlockedAdd64(&g_gpl_wait_tk, tk() - t0); } return *lib; }
+    if (!mine) { if (*how == 2) { InterlockedIncrement64(&g_gpl_wait); InterlockedAdd64(&g_gpl_wait_tk, tk() - t0); } return got; }
     *how = 1;
-    int isfs = v->stage == 1;
+    int isfs = v->stage == 1, mtmp = 0;
+    VkShaderModule mod = stage_mod_get(v, &mtmp);
     VkPipelineShaderStageCreateInfo st = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
-    st.stage = isfs ? VK_SHADER_STAGE_FRAGMENT_BIT : VK_SHADER_STAGE_VERTEX_BIT; st.module = v->mod; st.pName = "main";
+    st.stage = isfs ? VK_SHADER_STAGE_FRAGMENT_BIT : VK_SHADER_STAGE_VERTEX_BIT; st.module = mod; st.pName = "main";
     VkPipelineViewportStateCreateInfo vp = {VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
     vp.viewportCount = 1; vp.scissorCount = 1;
     VkPipelineRasterizationProvokingVertexStateCreateInfoEXT pv = {VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_PROVOKING_VERTEX_STATE_CREATE_INFO_EXT};
@@ -624,22 +684,102 @@ static VkPipeline stagelib_ensure(VStage *v, int alone, int *how) {
     FbRec fb_all = {0, 0}, fb_st = {0, 0};
     FbInfo fbi = {(VkStructureType)1000192000, NULL, &fb_all, 1, &fb_st};
     ri.pNext = &fbi;
-    VkResult r = pw_graphics(g_pcache, &gi, lib);
+    VkResult r = pw_graphics(g_pcache, &gi, &got);
+    stage_mod_put(v, mod, mtmp);
     if (r != VK_SUCCESS) vkd_fail("vkCreateGraphicsPipelines, stage library (%s stage %u): %s", isfs ? "fragment" : "vertex", v->id, vk_result_name(r));
     LONG64 dt = tk() - t0;
     fb_note(0, &fb_all, dt);
     EnterCriticalSection(&g_sh_lock);
+    *lib = got;
     *state = 2;
+    if (hold) { v->lib_users++; v->lib_linked = 1; }
+    v->lib_used = nvn_front_frame_next();
     WakeAllConditionVariable(&g_sh_cv);
     LeaveCriticalSection(&g_sh_lock);
+    stage_mod_drop(v);
     if (GetCurrentThreadId() == g_render_tid) {
         g_gpl_draw++; g_gpl_draw_tk += dt; if (dt > g_gpl_draw_max) g_gpl_draw_max = dt;
         if (holdlog_on()) { LARGE_INTEGER fq; QueryPerformanceFrequency(&fq); printf("nvn_vk_hold: frame %lld (%s): STAGE LIBRARY compiled at the draw, %.2f ms: %s code %016llx (key %x %x %x %x, forced outputs %x)%s\n", (long long)nvn_front_frame_next(), g_in_fight ? "fight" : "no fight",
                                    (double)dt * 1000.0 / (double)fq.QuadPart, isfs ? "fragment" : "vertex", (unsigned long long)v->hb, v->key[0], v->key[1], v->key[2], v->key[3], v->fo, alone ? " (a vertex stage drawn without a fragment stage)" : ""); }
     } else { InterlockedIncrement64(&g_gpl_made); InterlockedAdd64(&g_gpl_made_tk, dt); }
-    return *lib;
+    return got;
+}
+static VkPipeline stagelib_ensure(VStage *v, int alone, int *how) { return stagelib_get(v, alone, how, 0); }
+static void stagelib_release(VStage *v) { EnterCriticalSection(&g_sh_lock); v->lib_users--; LeaveCriticalSection(&g_sh_lock); }
+/* Memory round (2026-10-15). Stage libraries were kept until exit: run mario6 (26 min, NVIDIA) ended with 18,575 of them and
+ * 9.2 GB of private memory, growing with every screen and fighter met (about 0.4 MB each). Most of them are made ahead for
+ * every variation of a container the game announced, and no pipeline is ever linked from them. So on a loading screen far
+ * from a fight (m4_barrier, render thread) the least recently used of those beyond a budget are destroyed; a later link
+ * makes the library again, normally a hit of the driver's pipeline cache (about 1 ms on a worker: run match_new, 13,660 in
+ * 12.9 s). Only libraries NO pipeline was ever linked from (lib_linked). MEASURED (run memtest/new, NVIDIA RTX 4060 Laptop,
+ * driver 610.62): destroying libraries that linked pipelines had been made from crashed the process within a second (a call
+ * to address 0 on a thread of the driver), although the specification lets a library go after the link. Libraries used in
+ * the last 1800 frames are never taken, nor one a link is using (lib_users), nor any while the optimised re-link
+ * (SSBU_VK_GPL_OPT=1) may read them. Run memtest/mem_new against mem_old (8 fights, uncapped): 6.0 GB private memory at
+ * frame 15,000 against 8.1 GB, flat instead of growing. SSBU_VK_LIB_BUDGET=<n> libraries kept (default 4096; 0 = keep every
+ * library, as before). */
+static LONG64 g_ev_runs, g_ev_libs, g_ev_tk;
+static int lib_budget(void) { static int n = -2; if (n == -2) { const char *e = getenv("SSBU_VK_LIB_BUDGET"); n = e ? atoi(e) : 4096; if (n < 0) n = 0; } return n; }
+typedef struct { LONG64 used; VStage *v; } EvCand;
+typedef struct { int n; VkPipeline *p; } EvKill;
+static volatile LONG g_ev_busy;                    /* a destroying thread is running (gpl_destroy waits for it) */
+static DWORD WINAPI evict_destroy_main(void *arg) {
+    EvKill *k = arg;
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    for (int i = 0; i < k->n; i++) if (k->p[i]) vkDestroyPipeline(V.device, k->p[i], NULL);
+    free(k->p); free(k);
+    InterlockedDecrement(&g_ev_busy);
+    return 0;
+}
+static int evcand_cmp(const void *a, const void *b) { const EvCand *x = a, *y = b; return x->used < y->used ? -1 : x->used > y->used; }
+static void stagelib_evict(LONG64 frame) {
+    static LONG64 last = -100000;
+    int budget = lib_budget();
+    if (!budget || !gpl_sep() || gpl_opt_on() || frame - last < 600) return;
+    last = frame;
+    LONG64 t0 = tk();
+    int nlib = 0, ncand = 0, cap = 0, nkill = 0;
+    EvCand *c = NULL;
+    VkPipeline *kill = NULL;
+    EnterCriticalSection(&g_sh_lock);
+    for (int i = 0; i < 4096; i++) for (VStage *v = g_vstage[i]; v; v = v->next) {
+        int n = (v->lib_state == 2) + (v->lib2_state == 2);
+        nlib += n;
+        if (!n || v->lib_users || v->lib_linked || v->temp || frame - v->lib_used < 1800) continue;
+        if (ncand == cap) { cap = cap ? cap * 2 : 4096; c = realloc(c, sizeof *c * (size_t)cap); }
+        c[ncand].used = v->lib_used; c[ncand++].v = v;
+    }
+    if (nlib > budget && ncand) {
+        qsort(c, (size_t)ncand, sizeof *c, evcand_cmp);
+        kill = malloc(sizeof *kill * (size_t)ncand * 2);
+        for (int i = 0; i < ncand && nlib > budget; i++) {
+            VStage *v = c[i].v;
+            if (v->lib_state == 2) { kill[nkill++] = v->lib; v->lib = NULL; v->lib_state = 0; nlib--; }
+            if (v->lib2_state == 2) { kill[nkill++] = v->lib2; v->lib2 = NULL; v->lib2_state = 0; nlib--; }
+        }
+    }
+    LeaveCriticalSection(&g_sh_lock);
+    free(c);
+    if (!nkill) { free(kill); return; }
+    /* destroyed by a thread of its own: 7,777 vkDestroyPipeline took 62 ms (run memtest/even), a hitch of the loading screen.
+     * Nothing can reach these handles any more (taken out of their stages under the lock above). */
+    EvKill *ek = malloc(sizeof *ek);
+    ek->n = nkill; ek->p = kill;
+    InterlockedIncrement(&g_ev_busy);
+    HANDLE th = CreateThread(NULL, 0, evict_destroy_main, ek, 0, NULL);
+    if (th) CloseHandle(th); else evict_destroy_main(ek);
+    LONG64 dt = tk() - t0;
+    g_ev_runs++; g_ev_libs += nkill; g_ev_tk += dt;
+    {   LARGE_INTEGER fq; QueryPerformanceFrequency(&fq);
+        PROCESS_MEMORY_COUNTERS_EX pm; memset(&pm, 0, sizeof pm); pm.cb = sizeof pm;
+        K32GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS *)&pm, sizeof pm);
+        printf("nvn_vk_evict: frame %lld (a loading screen): %d stage libraries not used for 1800 frames (never linked) handed to a thread that destroys them (%.1f ms here), %d kept (budget %d); shader modules released %lld, read again %lld; process memory %llu MB private\n",
+               (long long)frame, nkill, (double)dt * 1000.0 / (double)fq.QuadPart, nlib, budget, (long long)g_mod_dropped, (long long)g_mod_reread, (unsigned long long)(pm.PrivateUsage >> 20));
+        fflush(stdout);
+    }
 }
 static void gpl_destroy(void) {
+    for (int i = 0; g_ev_busy && i < 5000; i++) Sleep(1);      /* stagelib_evict's destroying thread */
     for (int i = 0; i < 4096; i++) for (VStage *v = g_vstage[i]; v; v = v->next) { if (v->lib) { vkDestroyPipeline(V.device, v->lib, NULL); v->lib = NULL; } if (v->lib2) { vkDestroyPipeline(V.device, v->lib2, NULL); v->lib2 = NULL; } }
     if (g_ulayout) { vkDestroyPipelineLayout(V.device, g_ulayout, NULL); vkDestroyDescriptorSetLayout(V.device, g_udl[0], NULL); vkDestroyDescriptorSetLayout(V.device, g_udl[1], NULL); g_ulayout = NULL; }
     for (int i = 0; i < 1024; i++) for (PairLib *l = g_plib[i], *n; l; l = n) { n = l->next; if (l->lib) vkDestroyPipeline(V.device, l->lib, NULL); if (l->layout) vkDestroyPipelineLayout(V.device, l->layout, NULL); for (int k = 0; k < 2; k++) if (l->dl[k]) vkDestroyDescriptorSetLayout(V.device, l->dl[k], NULL); free(l); g_plib[i] = NULL; }
@@ -689,8 +829,8 @@ static double pipe_build(Pipe *p) {
         int how, how2 = 0, n = 0;
         VkPipeline libs[4];
         libs[n++] = gpl_vilib(k->topo_class < 3 ? k->topo_class : 2);
-        libs[n++] = stagelib_ensure(vs, !fs, &how);
-        if (fs) libs[n++] = stagelib_ensure(fs, 0, &how2);
+        libs[n++] = stagelib_get(vs, !fs, &how, 1);
+        if (fs) libs[n++] = stagelib_get(fs, 0, &how2, 1);
         libs[n++] = gpl_olib(k);
         if (how2 == 1 || how == 1) how = 1; else if (how2 == 2 || how == 2) how = 2;
         LONG64 t1 = tk();
@@ -702,6 +842,7 @@ static double pipe_build(Pipe *p) {
         FbInfo fbi = {(VkStructureType)1000192000, NULL, &fb_all, 0, NULL};
         pli.pNext = &fbi;
         VkResult r = pw_graphics(g_pcache, &gi, &p->p);
+        stagelib_release(vs); if (fs) stagelib_release(fs);      /* the link has consumed them: they may be evicted from now on */
         if (r != VK_SUCCESS) vkd_fail("vkCreateGraphicsPipelines, link of stage libraries (vertex stage %u, fragment stage %u, %d colour targets, depth format %d): %s", k->vs, k->fs, k->ncolor, k->dfmt, vk_result_name(r));
         LONG64 dt = tk() - t1;
         fb_note(1, &fb_all, dt);
@@ -756,8 +897,10 @@ static double pipe_build(Pipe *p) {
     VkPipelineShaderStageCreateInfo st[2];
     memset(st, 0, sizeof st);
     st[0].sType = st[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    st[0].stage = VK_SHADER_STAGE_VERTEX_BIT; st[0].module = vs->mod; st[0].pName = "main";
-    st[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT; st[1].module = fs ? fs->mod : NULL; st[1].pName = "main";
+    int vtmp = 0, ftmp = 0;
+    VkShaderModule vmod = stage_mod_get(vs, &vtmp), fmod = fs ? stage_mod_get(fs, &ftmp) : NULL;
+    st[0].stage = VK_SHADER_STAGE_VERTEX_BIT; st[0].module = vmod; st[0].pName = "main";
+    st[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT; st[1].module = fmod; st[1].pName = "main";
     VkPipelineInputAssemblyStateCreateInfo ia = {VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
     ia.topology = k->topo_class == 0 ? VK_PRIMITIVE_TOPOLOGY_POINT_LIST : k->topo_class == 1 ? VK_PRIMITIVE_TOPOLOGY_LINE_LIST : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     VkPipelineViewportStateCreateInfo vp = {VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
@@ -806,6 +949,7 @@ static double pipe_build(Pipe *p) {
     gi.pNext = &ri; gi.stageCount = fs ? 2 : 1; gi.pStages = st; gi.pInputAssemblyState = &ia; gi.pViewportState = &vp; gi.pRasterizationState = &rs; gi.pMultisampleState = &ms;
     gi.pDepthStencilState = &ds; gi.pColorBlendState = &cb; gi.pDynamicState = &dy; gi.layout = p->layout;
     VkResult r = pw_graphics(g_pcache, &gi, &p->p);
+    stage_mod_put(vs, vmod, vtmp); if (fs) stage_mod_put(fs, fmod, ftmp);
     if (r != VK_SUCCESS) vkd_fail("vkCreateGraphicsPipelines (vertex stage %u, fragment stage %u, %d colour targets, depth format %d): %s", k->vs, k->fs, k->ncolor, k->dfmt, vk_result_name(r));
     InterlockedIncrement64(&R.pipelines);
     EnterCriticalSection(&g_sh_lock);
@@ -882,6 +1026,23 @@ static void job_push_bg(Job *j) {                  /* g_sh_lock held */
     j->next = NULL;
     if (g_bq_tail) g_bq_tail->next = j; else g_bq_head = j;
     g_bq_tail = j; g_bq_queued++;
+    WakeConditionVariable(&g_jq_cv);
+}
+/* 2026-10-16, the ANNOUNCED queue: every variation of a container file the index named (pix_announce, prep 3). It was on
+ * g_bq, which no fight cap limits: run 20261016-090403 announced 274-811 variations at a time inside a fight (frames 5109,
+ * 8656, 8948, 9554), and each time the process went from 30-40 to 100-190 ms of CPU per frame while a quarter to half of the
+ * frames missed their refresh. Near a fight (bg_open) at most g_ann_fight_cap workers take from it (0: it waits for the next
+ * loading screen, which waits for it as it waited for g_bq). What the game itself hands over of such a container is a
+ * program on g_jq as before, and a draw that needs a stage still waiting here makes it (hold) or queues it in front
+ * (skip_queue_stage): nothing waits for this queue in a fight. SSBU_VK_ANN_FIGHT=<n> workers in a fight. */
+static Job *g_aq_head, *g_aq_tail;
+static LONG64 g_aq_queued, g_aq_done, g_aq_running, g_aq_fight_q;      /* queued / done: also declared at the top (the hold log) */
+static int g_ann_fight_cap = 0;
+static void job_push_ann(Job *j) {                 /* g_sh_lock held */
+    j->next = NULL;
+    if (g_aq_tail) g_aq_tail->next = j; else g_aq_head = j;
+    g_aq_tail = j; g_aq_queued++;
+    if (!bg_open()) g_aq_fight_q++;
     WakeConditionVariable(&g_jq_cv);
 }
 static void job_push_front(Job *j);
@@ -1175,32 +1336,34 @@ static void m4_barrier(LONG64 frame, LONG64 draws) {
     static int on = -1;
     if (on < 0) { const char *e = getenv("SSBU_VK_BARRIER"); on = e ? atoi(e) != 0 : D.has_gpl; }
     if (!on || draws > 60 || !g_pw_nthread) return;
+    if (frame >= 300 && !fight_recent()) stagelib_evict(frame);      /* memory round: a loading screen far from a fight */
     int save = 0;
     EnterCriticalSection(&g_sh_lock);
-    if (g_jq_queued != g_jq_done || g_bq_queued != g_bq_done) {
+    if (g_jq_queued != g_jq_done || g_bq_queued != g_bq_done || g_aq_queued != g_aq_done) {
         LONG64 t0 = tk();
         LARGE_INTEGER fq; QueryPerformanceFrequency(&fq);
+        g_bar_wait = 1; WakeAllConditionVariable(&g_jq_cv);      /* 2026-10-16: the announced queue is open to every worker while a loading screen is held (bg_open) */
         /* session 10: a loading screen that waits for the workers anyway (after the boot: frame 300 on) also waits for the
          * part of the preparation that is made into memory (the largest container: the one a fight hands over at "GO"), and
          * while it waits that part has every worker at normal priority */
         int keep = frame >= 300 && g_pk_queued != g_pk_done;
         if (keep) { g_prep_urgent = 1; g_bar_keep_n++; WakeAllConditionVariable(&g_jq_cv); }
-        LONG64 d0 = g_jq_done + g_bq_done, tlast = t0;
-        while ((g_jq_queued != g_jq_done || g_bq_queued != g_bq_done || (keep && g_pk_queued != g_pk_done)) && tk() - t0 < 20 * fq.QuadPart) {
+        LONG64 d0 = g_jq_done + g_bq_done + g_aq_done, tlast = t0;
+        while ((g_jq_queued != g_jq_done || g_bq_queued != g_bq_done || g_aq_queued != g_aq_done || (keep && g_pk_queued != g_pk_done)) && tk() - t0 < 20 * fq.QuadPart) {
             WD_SLEEP(&g_sh_cv, &g_sh_lock, 20);
             if (tk() - t0 > fq.QuadPart * 15 / 100 && tk() - tlast > fq.QuadPart / 10) {      /* session 11: held longer than 150 ms: the same picture again, with the progress bar, ten times a second */
-                LONG64 tot = g_jq_queued + g_bq_queued - d0, dn = g_jq_done + g_bq_done - d0;
+                LONG64 tot = g_jq_queued + g_bq_queued + g_aq_queued - d0, dn = g_jq_done + g_bq_done + g_aq_done - d0;
                 tlast = tk();
                 LeaveCriticalSection(&g_sh_lock);
                 present_progress(tot > 0 ? (float)dn / (float)tot : 0.0f);
                 EnterCriticalSection(&g_sh_lock);
             }
         }
-        g_prep_urgent = 0;
+        g_prep_urgent = 0; g_bar_wait = 0;
         LONG64 dt = tk() - t0;
         if (keep) { g_bar_keep_tk += dt; printf("nvn_vk_barrier: frame %lld: the loading screen also waited for the preparation's containers kept in memory (%.0f ms in all for this frame)\n", (long long)frame, (double)dt * 1000.0 / (double)fq.QuadPart); }
         g_bar_n++; g_bar_tk += dt; if (dt > g_bar_max) g_bar_max = dt;
-        if (g_jq_queued != g_jq_done || g_bq_queued != g_bq_done) { g_bar_timeout++; printf("nvn_vk_barrier: TIME-OUT at frame %lld: after 20 s the workers still have %lld + %lld jobs: the frame is presented, pipelines may be made at a draw\n", (long long)frame, (long long)(g_jq_queued - g_jq_done), (long long)(g_bq_queued - g_bq_done)); }
+        if (g_jq_queued != g_jq_done || g_bq_queued != g_bq_done || g_aq_queued != g_aq_done) { g_bar_timeout++; printf("nvn_vk_barrier: TIME-OUT at frame %lld: after 20 s the workers still have %lld + %lld + %lld (announced containers) jobs: the frame is presented, pipelines may be made at a draw\n", (long long)frame, (long long)(g_jq_queued - g_jq_done), (long long)(g_bq_queued - g_bq_done), (long long)(g_aq_queued - g_aq_done)); }
         else if (dt * 10 > fq.QuadPart) printf("nvn_vk_barrier: frame %lld (a loading screen: %lld draws) was held %.0f ms until the workers had finished every queued stage and pipeline\n", (long long)frame, (long long)draws, (double)dt * 1000.0 / (double)fq.QuadPart);
         save = g_pcsave_want && frame >= 300 && !fight_recent();
     }
@@ -1342,8 +1505,8 @@ static int pix_find(uint64_t hb, int *files) {     /* any thread: the container 
 }
 typedef struct { char name[40]; uint32_t size; uint8_t layout /* a layout archive's container ("...ArchiveShader...") */, late /* its pool was laid inside a fight (this run or an earlier one) */; } PrepFile;
 static PrepFile g_prep_file[1024];
-/* A worker: container file `f` is read and every variation goes to the background queue (the barrier and the callers of
- * nvnProgramSetShaders outside a fight wait for that queue). why: 0 a pool was laid over its code, 1 one of its programs was handed over. */
+/* A worker: container file `f` is read and every variation goes to the announced queue g_aq (the barrier and the callers of
+ * nvnProgramSetShaders outside a fight wait for that queue; near a fight it is paused, job_push_ann). why: 0 a pool was laid over its code, 1 one of its programs was handed over. */
 static void pix_announce(int f, int why) {
     char path[400];
     if (f < 0 || f >= 1024) return;
@@ -1489,12 +1652,15 @@ static DWORD WINAPI pw_main(void *arg) {           /* arg: the worker's number (
         }
         EnterCriticalSection(&g_sh_lock);
         /* session 10: a preparation job may be taken when nothing else waits; in a fight by at most g_prep_fight_cap workers */
-#define PQ_OK (g_pq_head && g_pq_running < (g_prep_urgent ? 64 : fight_recent() ? g_prep_fight_cap : g_prep_cap))
-        while (!g_jq_head && !g_bq_head && !PQ_OK && !g_m4_quit) SleepConditionVariableCS(&g_jq_cv, &g_sh_lock, g_pq_head ? 50 : INFINITE);
+#define PQ_OK (g_pq_head && g_pq_running < (g_prep_urgent ? 64 : fight_far() ? g_prep_cap : g_prep_fight_cap))
+        /* 2026-10-16: the announced containers (g_aq) after g_bq: every worker when no fight is near, g_ann_fight_cap near one */
+#define AQ_OK (g_aq_head && (bg_open() || g_aq_running < g_ann_fight_cap))
+        while (!g_jq_head && !g_bq_head && !AQ_OK && !PQ_OK && !g_m4_quit) SleepConditionVariableCS(&g_jq_cv, &g_sh_lock, g_pq_head || g_aq_head ? 50 : INFINITE);
         Job *j = g_jq_head;
         int bg = 0;
         if (j) { g_jq_head = j->next; if (!g_jq_head) g_jq_tail = NULL; }
         else if (!g_m4_quit && (j = g_bq_head) != NULL) { g_bq_head = j->next; if (!g_bq_head) g_bq_tail = NULL; bg = 1; }      /* at exit the background work is left undone */
+        else if (!g_m4_quit && AQ_OK) { j = g_aq_head; g_aq_head = j->next; if (!g_aq_head) g_aq_tail = NULL; bg = 3; g_aq_running++; }
         else if (!g_m4_quit && PQ_OK) { j = g_pq_head; g_pq_head = j->next; if (!g_pq_head) g_pq_tail = NULL; bg = 2; g_pq_running++; }
         Pipe *p = NULL;
         if (j && j->kind == 1 && j->pipe->state == 0) { p = j->pipe; p->state = 1; }
@@ -1504,6 +1670,7 @@ static DWORD WINAPI pw_main(void *arg) {           /* arg: the worker's number (
             int want = g_prep_urgent ? THREAD_PRIORITY_NORMAL : g_in_fight ? THREAD_PRIORITY_LOWEST : THREAD_PRIORITY_BELOW_NORMAL;
             SetThreadPriority(GetCurrentThread(), want); prio = -99;      /* set again at the next job (workers_boost may have changed it meanwhile) */
         }
+        if (bg == 3 && g_in_fight) { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST); prio = -99; }      /* SSBU_VK_ANN_FIGHT > 0 only */
         if (j->kind == 0) { if (j->prep == 2) job_prep(j); else job_prog(j); }
         else if (j->kind == 2) job_draw(j);
         else if (j->kind == 3) { int how; VStage *v = stage_ensure(&j->src[1], ssrc_hb(&j->src[1]), j->key1, 0, &how); if (how == 1) InterlockedIncrement64(&g_w_stages); if (v && v->ok && D.has_gpl && gpl_sep() && !g_offline && stage_fits_universal(v)) { int lh; stagelib_ensure(v, 0, &lh); } else if (j->cont == -7 && v && v->ok) gpl_fo_made(v); }
@@ -1516,7 +1683,7 @@ static DWORD WINAPI pw_main(void *arg) {           /* arg: the worker's number (
         int pk = j->prep == 1;
         free(j);
         EnterCriticalSection(&g_sh_lock);
-        if (bg == 2) { g_pq_done++; g_pq_running--; if (pk) g_pk_done++; } else if (bg) g_bq_done++; else g_jq_done++;
+        if (bg == 2) { g_pq_done++; g_pq_running--; if (pk) g_pk_done++; } else if (bg == 3) { g_aq_done++; g_aq_running--; } else if (bg) g_bq_done++; else g_jq_done++;
         WakeAllConditionVariable(&g_sh_cv);
         LeaveCriticalSection(&g_sh_lock);
     }
@@ -1597,10 +1764,10 @@ void nvn_vk_program_set(void *prog) {
     int fr = fight_recent();
     /* session 7: in a fight the caller (the game's main thread) is not held at all: a draw that needs the program waits for it
      * on the render thread, a program not drawn in this frame costs nothing */
-    if (!fr && (g_jq_queued - g_jq_done > g_pw_nthread || g_bq_queued > g_bq_done)) {
+    if (!fr && (g_jq_queued - g_jq_done > g_pw_nthread || g_bq_queued > g_bq_done || g_aq_queued > g_aq_done)) {
         LONG64 t0 = tk();
         LARGE_INTEGER fq; QueryPerformanceFrequency(&fq);
-        while ((g_jq_queued - g_jq_done > g_pw_nthread || g_bq_queued > g_bq_done) && tk() - t0 < 30 * fq.QuadPart) WD_SLEEP(&g_sh_cv, &g_sh_lock, 100);
+        while ((g_jq_queued - g_jq_done > g_pw_nthread || g_bq_queued > g_bq_done || g_aq_queued > g_aq_done) && tk() - t0 < 30 * fq.QuadPart) WD_SLEEP(&g_sh_cv, &g_sh_lock, 100);
         g_set_held++; g_set_held_tk += tk() - t0;
         nvn_setsh_part[7] += tk() - t0;
     }
@@ -1783,6 +1950,8 @@ static void prewarm_wait(void) {                   /* render thread, before its 
 }
 static void m4_report(void) {
     LARGE_INTEGER fq; QueryPerformanceFrequency(&fq);
+    printf("nvn_vk_mem: stage libraries evicted (never linked, budget %d; SSBU_VK_LIB_BUDGET): %lld in %lld runs, %.0f ms on the render thread in all | shader modules released after their library: %lld, read again from their SPIR-V file: %lld (SSBU_VK_MOD_KEEP=1 keeps them)\n",
+           lib_budget(), (long long)g_ev_libs, (long long)g_ev_runs, (double)g_ev_tk * 1000.0 / (double)fq.QuadPart, (long long)g_mod_dropped, (long long)g_mod_reread);
     if (D.has_gpl) {
         double q = 1000.0 / (double)fq.QuadPart;
         printf("nvn_vk_gpl: pair libraries compiled by the workers: %lld (%.0f ms of worker time; %lld of them asked for as shared vertex stage x fragment stage without a program of its own: %d such fragment stages, %d shared vertex stages); "
@@ -1799,8 +1968,8 @@ static void m4_report(void) {
     }
     if (D.has_gpl) printf("nvn_vk_gpl: mode %s; pipelines linked again with optimisation by the workers: %lld of %lld queued, %.0f ms of worker time\n", gpl_sep() ? "2 (a library per stage)" : "1 (a library per stage pair)", (long long)g_gpl_opt_n, (long long)g_gpl_opt_q, (double)g_gpl_opt_tk * 1000.0 / (double)fq.QuadPart);
     printf("nvn_vk_skip: shader_wait = %s; draws left out because a stage or pipeline was not ready: %lld in %lld frames (stage not ready %lld, pipeline not ready %lld)\n", skip_on() ? "skip (near a fight)" : "hold (the default)", (long long)g_skip_n, (long long)g_skip_frames, (long long)g_skip_stage, (long long)g_skip_pipe);
-    if (g_pix_ready) printf("nvn_vk_prep: containers announced whole from the index: %lld because a pool was laid over their code, %lld because one of their programs was handed over (%lld of all these while IN A FIGHT), %lld variations queued; pools looked up: %lld found in the index, %lld not; programs handed over whose variation several files hold (no container named): %lld; header searches not made near a fight: %lld\n",
-                            (long long)g_pix_ann_pool, (long long)g_pix_ann_prog, (long long)g_pix_ann_fight, (long long)g_pix_ann_vars, (long long)g_pix_pool_hit, (long long)g_pix_pool_miss, (long long)g_pix_ambiguous, (long long)g_cs_skipped);
+    if (g_pix_ready) printf("nvn_vk_prep: containers announced whole from the index: %lld because a pool was laid over their code, %lld because one of their programs was handed over (%lld of all these while IN A FIGHT), %lld variations queued (%lld of them near a fight, where at most %d workers take them; %lld done, %lld waiting); pools looked up: %lld found in the index, %lld not; programs handed over whose variation several files hold (no container named): %lld; header searches not made near a fight: %lld\n",
+                            (long long)g_pix_ann_pool, (long long)g_pix_ann_prog, (long long)g_pix_ann_fight, (long long)g_pix_ann_vars, (long long)g_aq_fight_q, g_ann_fight_cap, (long long)g_aq_done, (long long)(g_aq_queued - g_aq_done), (long long)g_pix_pool_hit, (long long)g_pix_pool_miss, (long long)g_pix_ambiguous, (long long)g_cs_skipped);
     if (g_prep_state == 1 || g_prep_state == 2) { prep_line(g_prep_state == 2 ? "report (finished)" : "report (NOT finished)"); printf("nvn_vk_prep: fight frames that passed while it ran: %lld; times the render thread raised the workers' priority because it had to wait for one: %lld; loading-screen frames that also waited for the containers kept in memory: %lld, %.0f ms in all\n", (long long)g_prep_fight_frames, (long long)g_boosts, (long long)g_bar_keep_n, (double)g_bar_keep_tk * 1000.0 / (double)fq.QuadPart); }
     printf("nvn_vk_barrier: loading-screen frames held for the workers: %lld, %.0f ms in all, longest %.0f ms, time-outs %lld | progress bar: %lld extra presents of a held loading screen, %lld normal frames with the thin bar (store / preparation running, no fight near)\n", (long long)g_bar_n, (double)g_bar_tk * 1000.0 / (double)fq.QuadPart, (double)g_bar_max * 1000.0 / (double)fq.QuadPart, (long long)g_bar_timeout, (long long)g_ovl_presents, (long long)g_ovl_frames);
     for (int i = 0; i < g_rtlog_n; i++) printf("nvn_vk_rt: %d x %d (mip level %d), %d colour targets (first format 0x%x), depth format 0x%x: %lld passes, %lld of them in fight frames, first in frame %lld\n", g_rtlog[i].w, g_rtlog[i].h, g_rtlog[i].lv, g_rtlog[i].ncol, g_rtlog[i].cf, g_rtlog[i].df, g_rtlog[i].n, g_rtlog[i].fight, g_rtlog[i].first);
@@ -2131,13 +2300,13 @@ static int cont_walk(uint64_t base, uint64_t size, int tag, int *njobs, uint64_t
         for (int i = 0; i < 3; i++) if (has[i]) need += (size_t)s[i].code_len + s[i].cdata_size + 16;
         Job *j = calloc(1, sizeof *j + need);
         uint8_t *d = j->data;
-        j->cont = tag < 0 ? 0 : tag;               /* tag -1 / -2 (session 10): a container of the preparation, read from the game's data: no pair bookkeeping, its own queue (-1 made into memory, -2 into the cache only); -4: a container file announced from the index (background queue, as the scan's) */
+        j->cont = tag < 0 ? 0 : tag;               /* tag -1 / -2 (session 10): a container of the preparation, read from the game's data: no pair bookkeeping, its own queue (-1 made into memory, -2 into the cache only); -4: a container file announced from the index (its own queue, g_aq) */
         j->prep = tag == -4 ? 3 : tag < 0 ? -tag : 0;
         for (int i = 0; i < 3; i++) if (has[i]) job_copy_src(j, &d, i, &s[i]);
         if (tag >= 0) InterlockedAdd64(&g_cs_bytes, (LONG64)need);
         EnterCriticalSection(&g_sh_lock);
         if (holdlog_on() && !g_offline) for (int i = 0; i < 2; i++) if (has[i]) ho_note(ssrc_hb(&s[i]), tag < 0 ? 2 : 1);
-        if (tag < 0 && tag != -4) job_push_prep(j); else job_push_bg(j);
+        if (tag == -4) job_push_ann(j); else if (tag < 0) job_push_prep(j); else job_push_bg(j);
         LeaveCriticalSection(&g_sh_lock);
         (*njobs)++;
     }
@@ -2542,6 +2711,7 @@ static void prep_start(void) {
     if (getenv("SSBU_VK_SWEEP_LOG") && atoi(getenv("SSBU_VK_SWEEP_LOG"))) CloseHandle(CreateThread(NULL, 0, sweep_main, NULL, 0, NULL));
     int on = e ? atoi(e) != 0 : (D.has_gpl && gpl_sep());
     if (getenv("SSBU_VK_PREP_FIGHT")) g_prep_fight_cap = atoi(getenv("SSBU_VK_PREP_FIGHT"));
+    if (getenv("SSBU_VK_ANN_FIGHT")) g_ann_fight_cap = atoi(getenv("SSBU_VK_ANN_FIGHT"));
     g_prep_cap = g_pw_nthread > 1 ? g_pw_nthread / 2 : 1;
     if (getenv("SSBU_VK_PREP_WORKERS") && atoi(getenv("SSBU_VK_PREP_WORKERS")) > 0) g_prep_cap = atoi(getenv("SSBU_VK_PREP_WORKERS"));
     if (getenv("SSBU_VK_PREP_KEEP")) g_prep_keep = atoi(getenv("SSBU_VK_PREP_KEEP"));

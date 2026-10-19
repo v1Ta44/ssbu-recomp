@@ -14,6 +14,7 @@
 #include "runtime.h"
 #include "hostrt.h"
 #include "nnpad.h"
+#include "input_trace.h"
 
 #define A0 (c->x[0])
 #define A1 (c->x[1])
@@ -543,7 +544,7 @@ static void fill_pad(uint64_t out, uint32_t id, int style_is_fullkey) {
                    if (r1_on() && r1_poll(mark_seen("fight") ? nt : 0)) nt = 0;                  /* R1 re-run: the sequence waits, the recorded values are given (R1 run-ahead: the speculative poll) */
                    fight_shot_poll(nt); if (mark_seen("fight")) l1_ticks += nt;
                    for (int n = nt; n > 0; n--) seq_tick(); }     /* S11: 1 per poll; SSBU_DETERMINISTIC in a fight: per fight frame (fighter_sdk\fighter_host.c) */
-    if (!player_connected(id)) return;
+    if (!player_connected(id)) { input_trace_pad(id, (const void *)(uintptr_t)out); return; }
     static const struct { int vk, bit; } map[] = {
         {'Z', BTN_A}, {'X', BTN_B}, {'C', BTN_X}, {'V', BTN_Y}, {'Q', BTN_L}, {'E', BTN_R}, {'A', BTN_ZL}, {'S', BTN_ZR},
         {VK_RETURN, BTN_PLUS}, {VK_BACK, BTN_MINUS}, {'J', BTN_LEFT}, {'I', BTN_UP}, {'L', BTN_RIGHT}, {'K', BTN_DOWN},
@@ -603,6 +604,7 @@ static void fill_pad(uint64_t out, uint32_t id, int style_is_fullkey) {
     wr32(out + 0x18, (uint32_t)rx);
     wr32(out + 0x1c, (uint32_t)ry);
     wr32(out + 0x20, wired ? 3 : 1);                          /* NpadAttribute: bit 0 connected, bit 1 wired */
+    input_trace_pad(id, (const void *)(uintptr_t)out);
 }
 
 static void hid_InitializeNpad(Ctx *c) { (void)c; hid_setup(); }

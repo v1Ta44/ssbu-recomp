@@ -1,0 +1,43 @@
+/* Layout only. Colours, fonts, plates, controls and motion come directly from
+ * tools/console/ui/style.css, staged unchanged beside this page at build time. */
+body { position: relative; overflow: hidden; }
+kbd { font: 11px/1.2 var(--body); padding: 3px 5px; border: 1px solid var(--faint); color: var(--mute); }
+#full { position: relative; z-index: 1; height: 100%; overflow: auto; padding: 22px 25px 24px; border: 1px solid var(--line); border-top: 3px solid var(--red); }
+#full .page { max-width: none; }
+#full .wipe { left: 0; }
+.topline { display: flex; justify-content: space-between; gap: 12px; align-items: center; margin-bottom: 15px; }
+.eyebrow { font: italic 650 12px/1 var(--disp); letter-spacing: .14em; color: var(--mute); }
+#full .banner { margin-bottom: 20px; }
+#full .banner h1 { font-size: 36px; padding: 7px 24px 9px 18px; }
+#full .banner h1::after { height: 27px; width: 7px; vertical-align: -2px; }
+.delay-connection { margin: 0 0 20px; padding: 13px 18px; grid-template-columns: 10px 1fr; border-left: 3px solid var(--gold); }
+.delay-connection .txt { font-size: 19px; }
+.delay-connection .sub { color: var(--mute); line-height: 1.6; }
+.delay-modes { display: grid; grid-template-columns: 1fr 1fr; }
+.delay-modes label, .delay-modes span { width: 100%; }
+.delay-modes span { min-height: 58px; }
+.delay-stepper { display: flex; justify-content: space-between; align-items: center; gap: 20px; padding: 16px 0 10px; }
+.delay-stepper .btn { min-width: 55px; padding: 15px; font-size: 24px; }
+.reading { display: flex; align-items: baseline; gap: 10px; }
+.reading strong { font: italic 850 64px/1 var(--disp); color: var(--ink); }
+.reading span { color: var(--mute); font: 18px var(--cjk); }
+.range-field .lbl { display: flex; justify-content: space-between; }
+.result-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-top: 18px; padding: 12px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.result-grid > div { display: flex; flex-direction: column; gap: 5px; }
+.result-grid b { font: italic 650 24px/1.3 var(--disp); }
+.result-grid > div:last-child b { color: var(--gold); }
+footer { margin-top: 14px; }
+footer .actions { justify-content: space-between; margin-top: 16px; }
+footer .help p { margin: 8px 0; color: var(--mute); font-size: 13px; }
+.chips input:focus-visible + span { outline: 2px solid var(--gold); outline-offset: -3px; }
+@media (max-height: 570px) { #full { padding-top: 13px; } .topline { margin-bottom: 10px; } #full .banner { margin-bottom: 12px; } .delay-connection { margin-bottom: 12px; } .delay-stepper { padding: 10px 0 6px; } .reading strong { font-size: 52px; } }
+
+/* Console collapses its sidebar labels under 1020px; these plates belong to
+ * the panel content, not that sidebar. Keep their content visible. */
+#connection .txt, #connection .sub { display: block; }
+#full .chips small { display: block; }
+
+#connection { justify-items: start; grid-template-columns: 10px 1fr; }
+
+body[data-expanded="false"] { background: transparent; }
+body[data-expanded="false"]::before { display: none; }

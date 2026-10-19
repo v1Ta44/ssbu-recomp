@@ -107,6 +107,7 @@ rules) is being converted with a second, general decompiler.
 - Any controller through SDL3; `config/controllers.ini` for remapping; `--pad-test` and `--pad-map`
 - The game's own movies (VP9), audio (Opus) and fonts, decoded by the runtime
 - Deterministic scripted input and recording/replay for testing
+- A native resource-package backend: file and stream replacement, new resources, sharing rules, patch formats and a C/JSON control API; game files stay read-only ([resource packages](docs/MOD_RESOURCES.md))
 - An audit that classifies every system call handler as real / lifted / simplified, with a strict mode
   that stops the game the moment it calls something that is not really implemented
 
@@ -114,7 +115,7 @@ rules) is being converted with a second, general decompiler.
 
 1. Every mode playable from start to end, steady 60 fps (fight frames are hold-free in the tests above; other modes are not measured)
 2. Internal resolution scale and a low-end profile
-3. Mod platform: file overrides, the function hook API with a small C++ SDK, documentation
+3. Mod platform: broaden native plugin compatibility; resource packages and the function hook API already have runtime backends and documented interfaces
 4. The shared fighter state machine as readable source (movement tech, cancel rules), so that changes to
    the battle system (wavedash, perfect pivot, a turbo mode) are ordinary mods; further out, new fighters,
    new modes, extra character slots and a larger character select screen
@@ -184,3 +185,5 @@ the software works with. The repository contains no copyrighted game data, no co
 firmware; it does not help anyone obtain them. You must own the game and dump it yourself.
 
 Licensed under the GNU General Public License, version 3 or later (see `LICENSE`).
+
+Resource packages are opt-in at build time (`scripts/setup.py --with-mods`; default off). Packaged builds install them into `mods/<mod-name>/`, beside `game/`. The Console Mods page detects support and manages content labels, aliases, enable flags, costume mappings, imports and deletion to its recycle folder. See [resource mods](docs/MOD_RESOURCES.md) and [packaging](docs/PACKAGING.md).

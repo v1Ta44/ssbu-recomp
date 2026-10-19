@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width">
+<title>pcsmash 接口索引</title>
+<style>
+body{font:15px system-ui;margin:24px;color:#213547;background:#f7f9fc}h1{font-size:24px}
+input,select{padding:10px;margin:5px 8px 12px 0;max-width:90%;border:1px solid #bdc9d8;border-radius:6px}
+input{width:520px}table{border-collapse:collapse;width:100%;background:white}
+th,td{text-align:left;padding:10px;border-bottom:1px solid #dde5ef;vertical-align:top}
+th{position:sticky;top:0;background:#e7eef8}td:nth-child(2){word-break:break-all}
+details{max-width:740px}pre{white-space:pre-wrap;word-break:break-word}button{padding:9px;margin:10px}
+</style>
+<h1>pcsmash 接口索引</h1>
+<p>静态源码条目与本地构建符号。候选注册项可能被后续覆盖；函数存在不表示功能完整。每页显示 100 条。</p>
+<label>搜索 <input id="q" placeholder="例如 ssbu_net_join、yn_ldn、SSBU_NET_HOST 或脚本路径"></label>
+<label>类别 <select id="cat"><option value="">全部</option></select></label>
+<p id="count" aria-live="polite"></p>
+<table><thead><tr><th>类别</th><th>接口 / 符号</th><th>位置</th><th>签名 / 详情</th></tr></thead><tbody id="body"></tbody></table>
+<button id="prev">上一页</button><span id="page"></span><button id="next">下一页</button>
+<script id="data" type="application/json">__INTERFACE_DATA__</script>
+<script>
+const rows=JSON.parse(document.getElementById('data').textContent);
+const q=document.getElementById('q'),cat=document.getElementById('cat');
+const labels={source_functions:'源码函数',callback_contracts:'回调约定',header_macros:'头文件宏',guest_imports:'游戏导入 / NVN 分发',environment:'环境变量',cli:'命令行',dynamic_bindings:'动态绑定',generated_symbols:'本地游戏符号',binary_exports:'实际二进制导出',configuration:'配置字段'};
+let page=0;
+for(const c of [...new Set(rows.map(r=>r.category))]){
+  const o=document.createElement('option');o.value=c;o.textContent=labels[c]||c;cat.append(o);
+}
+const indexed=rows.map(r=>({r,text:JSON.stringify(r).toLowerCase()}));
+function draw(){
+  const terms=q.value.toLowerCase().trim().split(/\s+/).filter(Boolean);
+  const hits=indexed.filter(x=>(!cat.value||x.r.category===cat.value)&&terms.every(t=>x.text.includes(t))).map(x=>x.r);
+  const pages=Math.max(1,Math.ceil(hits.length/100));page=Math.max(0,Math.min(page,pages-1));
+  document.getElementById('count').textContent='匹配 '+hits.length+' 条 / 共 '+rows.length+' 条';
+  const body=document.getElementById('body');body.replaceChildren();
+  for(const r of hits.slice(page*100,(page+1)*100)){
+    const tr=document.createElement('tr');
+    for(const value of [labels[r.category]||r.category,r.name||r.handler||'',r.file+':'+(r.line||'—')]){
+      const td=document.createElement('td');td.textContent=value;tr.append(td);
+    }
+    const td=document.createElement('td'),d=document.createElement('details'),s=document.createElement('summary'),p=document.createElement('pre');
+    s.textContent=r.signature||r.handler||r.expression||r.direction||r.kind||'展开详情';
+    p.textContent=JSON.stringify(r,null,2);d.append(s,p);td.append(d);tr.append(td);body.append(tr);
+  }
+  document.getElementById('page').textContent=(page+1)+' / '+pages;
+  document.getElementById('prev').disabled=page===0;document.getElementById('next').disabled=page===pages-1;
+}
+let pending;
+q.addEventListener('input',()=>{clearTimeout(pending);pending=setTimeout(()=>{page=0;draw()},150)});
+cat.addEventListener('change',()=>{page=0;draw()});
+document.getElementById('prev').onclick=()=>{page--;draw()};document.getElementById('next').onclick=()=>{page++;draw()};draw();
+</script>
+</html>

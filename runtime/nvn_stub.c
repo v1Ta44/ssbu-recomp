@@ -9,6 +9,7 @@
 #include <windows.h>
 #include "runtime.h"
 #include "hostrt.h"
+#include "nvn_lifetime.h"
 
 #define A0 (c->x[0])
 #define A1 (c->x[1])
@@ -99,11 +100,20 @@ static void builder_get_device(Ctx *c) { RET(g_device); }
 static void pool_builder_get_memory(Ctx *c) { RET(nobj(A0)->memory); }
 static void pool_builder_get_size(Ctx *c) { RET(nobj(A0)->size); }
 static void pool_builder_get_flags(Ctx *c) { RET(nobj(A0)->flags); }
-void nvn_front_memory_retire(uint64_t addr, uint64_t size);      /* PR #41 (nvn_gl.c): finish deferred reads and compute copy-back before the guest releases this storage */
+void nvn_front_memory_retire(uint64_t addr, uint64_t size);
 static void pool_finalize(Ctx *c) {
+    if (nvn_lifetime_enabled()) {
+        uint64_t memory=0, size=0;
+        unsigned h=(unsigned)((A0 >> 3)*2654435761u)&4095;
+        AcquireSRWLockShared(&g_objs_lock);
+        for (NvnObj *o=g_objs[h];o;o=o->next) if (o->key==A0) { memory=o->memory; size=o->size; break; }
+        ReleaseSRWLockShared(&g_objs_lock);
+        (void)NVN_LIFE(NL_POOL_FINAL_BEGIN,0,A0,A0,memory,size,0,c->x[30]);
+    }
     NvnObj *o = nobj(A0);
     nvn_front_memory_retire(o->memory, o->size);
     nvn_label_drop(A0); nobj_drop(A0);
+    (void)NVN_LIFE(NL_POOL_FINAL_END,0,A0,A0,0,0,0,c->x[30]);
 }
 static void obj_set_label(Ctx *c) { nvn_label_set(A0, A1 ? (const char *)(uintptr_t)A1 : ""); }
 /* FlushMappedRange(object, offset, size): the CPU wrote this range and the GPU must see it. Pool memory is ordinary host memory here,
@@ -123,7 +133,7 @@ static void obj_debug_id(Ctx *c) { RET(A0); }
 static void pool_builder_storage(Ctx *c) { log_call(c); NvnObj *b = nobj(A0); b->memory = A1; b->size = A2; }   /* (builder, memory, size) */
 static void pool_builder_flags(Ctx *c) { nobj(A0)->flags = A1; }                                               /* (builder, flags) */
 void nvn_front_pool_made(uint64_t memory, uint64_t size);      /* nvn_gl.c: V1 session 6, a pool laid over the code section of a shader container announces the container */
-static void pool_initialize(Ctx *c) { log_call(c); NvnObj *p = nobj(A0), *b = nobj(A1); p->memory = b->memory; p->size = b->size; p->flags = b->flags; nvn_front_pool_made((uint64_t)p->memory, (uint64_t)p->size); RET(1); }
+static void pool_initialize(Ctx *c) { log_call(c); NvnObj *p = nobj(A0), *b = nobj(A1); p->memory = b->memory; p->size = b->size; p->flags = b->flags; (void)NVN_LIFE(NL_POOL_INIT,0,A0,A0,p->memory,p->size,p->flags,c->x[30]); nvn_front_pool_made((uint64_t)p->memory, (uint64_t)p->size); RET(1); }
 static void pool_flags(Ctx *c) { RET(nobj(A0)->flags); }
 /* nvnMemoryPoolMapVirtual(pool, numRequests, const NVNmappingRequest *requests) [sdk 0x41ec70]: takes the NVN lock and calls the
  * pool's method +0x60. Which class a pool is, is decided at nvnMemoryPoolInitialize by flag bit 9 (0x200, "virtual")

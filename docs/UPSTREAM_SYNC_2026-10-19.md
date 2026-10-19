@@ -46,7 +46,7 @@
 
 - 已更新原 #46（提交 `a643efc`），不新建 PR；原 PR 描述补充真实菜单/对战和实际 Windows 焦点切换证据。
 - 修复另行带回 yuzu，继续保留个人分支默认关闭焦点通知/冻结的行为；启动器也明确设置 `SSBU_FOCUS_NOTIFY=0`。
-- 新完整测试包将从本次更新后的 yuzu 构建，保留模组、联机、延迟面板、Console/更新器，含独立完整 data.arc，不夹带本机存档。旧完整测试包仅在新包通过校验后删除，个人资料先保全。
+- 新完整测试包已从本次更新后的 yuzu 构建，保留模组、联机、延迟面板、Console/更新器，含独立完整 data.arc，不夹带本机存档。旧完整包在新包验证通过后移出交付目录并归档，个人资料已保全；永久删除被自动审批检查拒绝（仅返回 blocked by policy），未执行永久删除。
 
 ## 最终提交历史整理
 
@@ -55,3 +55,17 @@
 ## 移除失效的 #34 方案
 
 按用户追加要求，完整撤回个人提交 bdc632f 的全部运行时改动：独立预告队列、SSBU_VK_ANN_FIGHT、连续 120 帧无计算调度的判断、等待/统计和 watchdog 扩展。三份源码上的反向补丁原样应用成功；nvn_vk_draw.c 与 nvn_vk_wd.c 恢复为当前上游原样。nvn_vk_m4.c 只保留未被上游采用的 #29 模块/库内存管理差异。#34 旧分支归档后删除，新完整测试包据此重新构建和校验。
+
+## 最终完整测试包交付
+
+- 版本：2026.10.19.3；构建 ID：`aa360252227c-upstream-pr46-bg-no34`；运行时来源提交 e715c3c。仅本地交付，没有发布在线更新。
+- 文件夹：`D:/pcsmash/build/dist/PcSmash-yuzu-2026.10.19.3-complete-with-data-arc/`。
+- 完整 ZIP：同目录同名 `.zip`，18026735937 字节（16.79 GiB），含独立完整 data.arc（17,600,869,448 字节）。
+- ZIP SHA-256：`f7466012faf88b0c80bfc8d00b2d853f8673160fd01f11f77775f6b78ec61024`；旁边有 `.zip.sha256`。
+- 整包 826 文件解压、CRC 与 SHA-256 通过；297 个签名受管理文件、签名版本序号 3 通过。data.arc 与原始本机归档哈希一致，原档未改。
+- 使用最终 ZIP 实际解压出来的程序，通过包内相对路径读取 ELF、模块和 data.arc；经过菜单进入真实对战，跑满 1,200 个呈现对战帧，正常退出。
+- 验证时刻意不设置 SSBU_FOCUS_NOTIFY，检查程序默认行为；窗口被遮挡和最小化后，帧数与通知轮询继续前进，g_guest_frozen 为 0。启动器另显式设置 SSBU_FOCUS_NOTIFY=0。
+- 最终程序无 SSBU_VK_ANN_FIGHT 和旧预告队列诊断文本。移除 #34 后，计算退休和纹理快照/后备路径回归再次通过。
+- 最终交付目录只有新版完整包；旧 2026.10.19.2 完整文件夹、ZIP 和两个附属文件已可恢复地移至 `D:/pcsmash-archives/upstream-sync-20261019-171224/superseded-test-packages/`。永久删除未执行，归档仍占磁盘空间。
+- 旧包原有全部可变文件先按 SHA-256 归档到同备份根下的 old-test-package-metadata；没有个人存档被删除。原在线发行恢复文件、源码/构建资料和其他工作目录仍保留。
+- 来源与结果：`work/complete-package-20261019-upstream/{package-summary.json,verification.json,signature-final.log,cleanup-results.json}`；真实后台状态计数在 background-validation-final/os-background.json。
